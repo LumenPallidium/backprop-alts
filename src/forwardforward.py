@@ -1,5 +1,8 @@
 import torch
 import numpy as np
+from time import time
+from tqdm import tqdm
+from .utils import _prepare_for_epochs
 
 def goodness(activation, theta = 0, gamma = 0):
     energy = torch.sum(activation ** 2) + gamma - theta
@@ -40,7 +43,7 @@ class FFNet(torch.nn.Module):
     def __init__(self,
                  in_dim,
                  n_layers = 3,
-                 dim = None,
+                 dim_mult = 1,
                  out_dim = None,
                  activation = torch.nn.ReLU(),
                  theta = 0,
@@ -49,21 +52,24 @@ class FFNet(torch.nn.Module):
         super().__init__()
         self.in_dim = in_dim
         self.n_layers = n_layers
-        if dim is None:
-            dim = in_dim
-        self.dim = dim
+        self.dim_mult = dim_mult
         if out_dim is None:
-            out_dim = dim
+            out_dim = in_dim
         self.out_dim = out_dim
+
         self.activation = activation
         self.theta = theta
         self.n_labels = n_labels
 
+        dim = int(in_dim * dim_mult)
         self.layers = torch.nn.ModuleList()
         self.layers.append(FFBlock(in_dim + n_labels, dim, activation = activation, theta = theta, bias = bias))
+        in_dim = dim
 
         for i in range(n_layers - 2):
-            self.layers.append(FFBlock(dim, dim, activation = activation, theta = theta, bias = bias))
+            dim = int(dim * dim_mult)
+            self.layers.append(FFBlock(in_dim, dim, activation = activation, theta = theta, bias = bias))
+            in_dim = dim
         
         self.layers.append(FFBlock(dim, out_dim, activation = activation, theta = theta, bias = bias))
 
@@ -84,7 +90,8 @@ class FFNet(torch.nn.Module):
 
         # create an array like y, but not the same label
         y_neg = torch.rand(y.shape, device=y.device) * (1.0 - y)
-        y_neg = torch.nn.functional.one_hot(torch.argmax(y_neg, axis=1), num_classes = n_labels)
+        y_neg = torch.nn.functional.one_hot(torch.argmax(y_neg, axis=1),
+                                            num_classes = self.n_labels)
 
         # create a random mask
         mask = torch.rand(y.shape[0], device=x.device) > 0.5
@@ -127,20 +134,24 @@ class FFNet(torch.nn.Module):
         return (pred == y).float().mean().item()
 
 def mnist_test_ff(in_dim, 
-                  dim, 
-                  n_layers, 
-                  threshold, 
+                  n_layers,
                   n_epochs, 
-                  batch_size, 
-                  lr, 
+                  dim_mult = 0.75, 
+                  threshold = 10, 
+                  batch_size = 256, 
+                  lr = 0.1, 
                   easy = False,
                   collaborative = True):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     net = FFNet(in_dim,
-                dim = dim,
+                dim_mult = dim_mult,
                 n_layers = n_layers,
                 theta = threshold,
                 ).to(device)
+    
+    details = {"epoch_accs" : [],
+               "epoch_times" : [],
+               "epoch_samples" : [],}
 
     with torch.no_grad():
         mnist, mnist_val, accs, errors = _prepare_for_epochs()
@@ -162,19 +173,30 @@ def mnist_test_ff(in_dim,
                 epoch_val_accs.append(acc)
 
             print(f"Epoch {epoch} validation accuracy: {np.mean(epoch_val_accs)}")
+            details["epoch_accs"].append(np.mean(epoch_val_accs))
             accs.extend(epoch_val_accs)
 
             if collaborative:
-                _collaborative_ff_train(net, mnist, device, lr = lr, easy = easy)
+                time, samples = _collaborative_ff_train(net, mnist, 
+                                                        device, n_layers,
+                                                        lr = lr, easy = easy,
+                                                        batch_size = batch_size)
             else:
-                _noncollaborative_ff_train(net, mnist, device, lr = lr, easy = easy)
+                time, samples = _noncollaborative_ff_train(net, mnist, 
+                                                           device, n_layers,
+                                                           lr = lr, easy = easy,
+                                                           batch_size = batch_size)
 
-    return accs, errors, y
+            details["epoch_times"].append(time)
+            details["epoch_samples"].append(samples)
 
-def _collaborative_ff_train(net, data, device, lr = 0.1, easy = False):
+    return accs, errors, y, details
+
+def _collaborative_ff_train(net, data, device, n_layers, lr = 0.1, easy = False, batch_size = 256):
     train_loader = torch.utils.data.DataLoader(data, 
                                                 batch_size = batch_size, 
                                                 shuffle = True)
+    time_start = time()
     for i, (x, y) in tqdm(enumerate(train_loader)):
         x = x.reshape([x.shape[0], -1]).to(device)
         if easy:
@@ -190,9 +212,12 @@ def _collaborative_ff_train(net, data, device, lr = 0.1, easy = False):
             energy_subset = [energies[j] for j in range(n_layers) if j != layer_i]
             gamma = torch.stack(energy_subset, dim = 0).sum(dim = 0)
             net.train_step(x, y, layer_i, lr = lr, gamma = gamma)
+    return time() - time_start, i * batch_size
 
-def _noncollaborative_ff_train(net, data, device, lr = 0.1, easy = False):
+def _noncollaborative_ff_train(net, data, device, n_layers, lr = 0.1, easy = False, 
+                               batch_size = 256):
 
+    time_start = time()
     for layer_i in range(n_layers):
         train_loader = torch.utils.data.DataLoader(data, 
                                                     batch_size = batch_size, 
@@ -206,7 +231,7 @@ def _noncollaborative_ff_train(net, data, device, lr = 0.1, easy = False):
             y = y.to(device)
 
             net.train_step(x, y, layer_i, lr = lr)
-
+    return time() - time_start, i * batch_size
 
 #TODO : should goodness be a scalar?
 if __name__ == "__main__":
@@ -226,13 +251,14 @@ if __name__ == "__main__":
     easy = True
 
     mnist_test_ff(in_dim, 
-                  dim, 
-                  n_layers, 
-                  threshold, 
-                  n_epochs,
-                  batch_size, 
-                  lr,
-                  easy = easy,)
+                  n_layers,
+                  n_epochs, 
+                  dim_mult = 0.75, 
+                  threshold = threshold, 
+                  batch_size = batch_size, 
+                  lr = lr, 
+                  easy = easy,
+                  collaborative = True)
 
 
 

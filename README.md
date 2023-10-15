@@ -1,5 +1,7 @@
 # Introduction
 
+THIS IS VERY MUCH A WORK IN PROGRESS, BUT HOPEFULLY IS INTERESTING NONETHELESS!!
+
 This is a repository for alternative learning rules to backpropagation. Most of the implemented methods use no backpropagation, however some do use it, but are not completely reliant on it (fast weight programmers and reservoir computers).
 
 The following methods are implemented:
@@ -12,6 +14,25 @@ The following methods are implemented:
 * [Forward-forward Learning](https://arxiv.org/abs/2212.13345)
 
 In general, the rules are implemented and tested on MNIST.
+
+# Results
+
+All of the fully implemented algorithms are compared by their sample efficiency (how accurate are they with N samples?) and clock time efficiency (how accurate are they with X seconds of train time?). Architectures were identical as possible, however there are some caveats to that:
+
+* Hebbian learning requires odd activation functions so Tanh was used, while backprop-based training worked very poorly with Tanh, so in fairness it was replace with ReLU
+* The bidirectional version of predictive coding has forward and backward layers, so it technically has double the parameters in training, however a inference forward pass still uses the same number of parameters
+* Reservoir computing involves a blob of neurons, I did some arithmetic so the blobs have equal synapse/parameter count as the layered networks
+
+The following plot shows sample efficiency:
+
+![Sample Efficiency](plots/Sample%20Efficiency.png)
+
+Backprop and the reservoir computer required optimizers, SGD was used with learning rate 0.01. Note that forward-forward does not function well with continuous (i.e. in [0, 1] values). The paper uses binary pixel values, which I did not do for comparison with the other backpropagation alternatives.
+
+Sample efficiency is not the whole story: predictive coding relies on a slow equilbration phase involving hundreds of forward passes per sample. For this reason, time taken is also important:
+
+![Clock Time](plots/Clock%20Time.png)
+
 
 # Implementation Overview
 

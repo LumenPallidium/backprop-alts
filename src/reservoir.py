@@ -1,5 +1,5 @@
 import torch
-from hebbian_learning import hebbian_wta
+from .hebbian_learning import hebbian_wta
 
 def generate_directed_ER(dim,
                          link_prob = 0.5,
@@ -138,15 +138,14 @@ class Reservoir(torch.nn.Module):
         else:
             return temp_state.clone().detach()
         
-    def train_step(self, x, labels, n_steps = 20, lr = 0.01):
+    def train_step(self, x, labels, n_steps = 20):
         # TODO : what if the reservoir was Hebbian o_O
         hidden_state = self.forward(x,
                                     n_steps = n_steps,
                                     readout = False)
         
         error = self.readout.train_step(hidden_state,
-                                        labels,
-                                        lr = lr)
+                                        labels)
         return error
     
 class LinearReadout(torch.nn.Module):
@@ -155,22 +154,24 @@ class LinearReadout(torch.nn.Module):
                  out_dim,
                  bias = False,
                  optimizer = None,
+                 lr = 0.01
                  ):
         super().__init__()
         self.in_dim = in_dim
         self.out_dim = out_dim
         self.bias = bias
+        self.lr = lr
 
         self.W = torch.nn.Linear(in_dim, out_dim, bias = bias)
 
         if optimizer is not None:
-            optimizer = optimizer(self.parameters())
+            optimizer = optimizer(self.parameters(), lr = lr)
         self.optimizer = optimizer
 
     def forward(self, x):
         return self.W(x)
     
-    def train_step(self, x, labels, lr = 0.01):
+    def train_step(self, x, labels):
         labels = labels.float()
         if self.optimizer is None:
             with torch.no_grad():
@@ -179,10 +180,10 @@ class LinearReadout(torch.nn.Module):
 
                 # note WTA doesn't use the prediction in training
                 dW = hebbian_wta(x, labels, self.W.weight)
-                self.W.weight.data += lr * dW
+                self.W.weight.data += self.lr * dW
 
                 if self.bias:
-                    self.W.bias.data -= lr * loss.mean(axis = 0)
+                    self.W.bias.data -= self.lr * loss.mean(axis = 0)
                 return [loss.item()]
         else:
             # enable grad

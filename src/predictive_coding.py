@@ -4,7 +4,7 @@ class BDPredictiveBlock(torch.nn.Module):
     def __init__(self,
                  in_dim,
                  out_dim,
-                 activation = torch.nn.Identity(),
+                 activation = torch.nn.Tanh(),
                  bias = False,
                  whiten = False):
         """
@@ -61,7 +61,7 @@ class BDPredictiveBlock(torch.nn.Module):
         self.forward_layer.weight -= lr * dW
 
         if self.whiten:
-            self.sd.mul_(1 - lr).add_(lr * x.std(dim = 0))
+            self.sd_forward .mul_(1 - lr).add_(lr * x.std(dim = 0))
 
         if self.biased:
             db = -(x.mean(dim = 0))
@@ -72,6 +72,10 @@ class BDPredictiveBlock(torch.nn.Module):
         dW = torch.einsum("bi,bj->ij", error, x) / batch_size
 
         self.backward_layer.weight -= lr * dW
+
+        if self.whiten:
+            self.sd_backward.mul_(1 - lr).add_(lr * x.std(dim = 0))
+
         if self.biased:
             db = -(x.mean(dim = 0))
             self.bias_backward.mul_(1 - lr).add_(lr * db)
@@ -82,7 +86,7 @@ class BDPredictiveCoder(torch.nn.Module):
                  out_dim,
                  dim_mult = 1,
                  n_layers = 3,
-                 activation = torch.nn.Identity(),
+                 activation = torch.nn.Tanh(),
                  bias = False):
         """
         A bidirectional predictive coding network with forward and backward layers that 
@@ -200,9 +204,7 @@ class PCNet(torch.nn.Module):
                  out_dim,
                  dim_mult = 1,
                  n_layers = 3,
-                 activation = torch.nn.Identity(),
-                 bias = False,
-                 whiten = False
+                 activation = torch.nn.Tanh()
                  ):
         super().__init__()
         self.in_dim = in_dim
@@ -292,7 +294,7 @@ class PCNet(torch.nn.Module):
         return error # final error
 
 
-#TODO : the backwards prediction is always the same for each digit for HebbianPredictiveCoder?
+#TODO : the backwards prediction is always the same for each digit for BDPredictiveCoder?
 #TODO : can i add intelligent stochasticity for variable prediction?
 #TODO : eg learn a noise direction based on the current input?
 #TODO : variable LR based on surprisal?
@@ -309,7 +311,6 @@ if __name__ == "__main__":
     dim_multiplier = 0.75
     n_epochs = 3
     n_labels = 10
-    save_every = 10
     sample_noise_scale = 0.01
     bias = True
     whiten = True

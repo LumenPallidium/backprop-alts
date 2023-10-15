@@ -2,6 +2,7 @@ from tqdm import tqdm
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
+from time import time
 from torchvision import datasets, transforms
 
 def _prepare_for_epochs():
@@ -25,6 +26,13 @@ def mnist_test(net,
                n_labels = 10, 
                save_every = 10,
                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")):
+    
+    details = {"epoch_accs" : [],
+               "epoch_times" : [],
+               "epoch_samples" : [],}
+    
+    net.to(device)
+
     with torch.no_grad():
 
         mnist, mnist_val, accs, errors = _prepare_for_epochs()
@@ -50,9 +58,11 @@ def mnist_test(net,
                 epoch_accs.append(acc.item())
 
             print(f"Epoch {epoch} Accuracy: {np.mean(epoch_accs)}")
+            details["epoch_accs"].append(np.mean(epoch_accs))
 
             accs.extend(epoch_accs)
 
+            start = time()
             for i, (x, y) in tqdm(enumerate(train_loader)):
                 x = x.to(device)
                 y = y.to(device)
@@ -62,8 +72,9 @@ def mnist_test(net,
 
                 if i % save_every == 0:
                     errors.append(error[0])
-        
-        plt.plot(accs)
-        plt.show()
+            epoch_time = time() - start
 
-        return accs, errors, y
+            details["epoch_times"].append(epoch_time)
+            details["epoch_samples"].append(i * batch_size)
+
+        return accs, errors, y, details
