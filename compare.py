@@ -174,17 +174,19 @@ def pretty_plot(x_data,
     plt.close()
 
 if __name__ == "__main__":
-    scores = mnist_comparisons(5)
-    scores = scores["3"]
+    all_scores = mnist_comparisons(5,
+                                   n_layers = [3, 5, 7, 10])
 
-    # for now i'll do things this messy way
-    labels = list(scores.keys())
-    accs = [list(scores[label]["epoch_accs"]) for label in labels]
-    times = [list(scores[label]["epoch_times"]) for label in labels]
-    times = np.cumsum(times, axis = 1)
-    samples = [list(scores[label]["epoch_samples"]) for label in labels]
-    samples = np.cumsum(samples, axis = 1)
+    for n_layers, scores in all_scores.items():
+        # TODO : do this in pandas or something
+        labels = list(scores.keys())
+        accs = [list(scores[label]["epoch_accs"]) for label in labels]
+        times = [list(scores[label]["epoch_times"]) for label in labels]
+        times = np.cumsum(times, axis = 1)
+        samples = [list(scores[label]["epoch_samples"]) for label in labels]
+        samples = np.cumsum(samples, axis = 1)
 
-    pretty_plot(times, accs, labels, "Clock Time", "Time (s)", "Top-1 Accuracy")
-    pretty_plot(samples, accs, labels, "Sample Efficiency", "Samples", "Top-1 Accuracy")
+        pretty_plot(times, accs, labels, f"Clock Time ({n_layers} layers)", "Time (s)", "Validation Accuracy")
+        pretty_plot(samples, accs, labels, f"Sample Efficiency({n_layers} layers)", "Samples", "Validation Accuracy")
+        
 
