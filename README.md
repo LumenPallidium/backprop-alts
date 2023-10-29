@@ -34,6 +34,15 @@ Sample efficiency is not the whole story: predictive coding relies on a slow equ
 ![Clock Time](plots/Clock%20Time.png)
 
 
+## TODOs
+
+Checked means started, not done (it wouldn't be on here if it was done!). Unchecked means not started.
+
+- [x] Finish RL with dynamical systems
+- [x] Finish genetic algorithms
+- [ ] Add generec and pineida-almeida
+- [ ] more plots, including depth (also store everything in pandas)
+
 # Implementation Overview
 
 ## Hebbian Learning
