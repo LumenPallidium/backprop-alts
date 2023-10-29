@@ -1,5 +1,5 @@
 import torch
-from .hebbian_learning import hebbian_wta
+from .hebbian_learning import hebbian_wta, hebbian_pca
 
 def generate_directed_ER(dim,
                          link_prob = 0.5,
@@ -38,6 +38,11 @@ def generate_directed_ER(dim,
         adj = adj * spectral_radius
     
     return adj.float()
+
+def generate_directed_BA(final_dim,
+                         start_dim = 256,
+                         ):
+    raise NotImplementedError
 
 class Reservoir(torch.nn.Module):
     """
@@ -78,13 +83,15 @@ class Reservoir(torch.nn.Module):
                  spectral_radius = None,
                  activation = torch.nn.Tanh(),
                  state = None,
-                 readout = None):
+                 readout = None,
+                 adaptive = True):
         super().__init__()
         self.in_dim = in_dim
         if dim is None:
             dim = in_dim
         self.dim = dim
         self.inertia = inertia
+        self.adaptive = adaptive
 
         self.in_weight = torch.nn.Parameter(torch.empty((dim, in_dim)))
         torch.nn.init.uniform_(self.in_weight, weight_range[0], weight_range[1])
@@ -137,12 +144,24 @@ class Reservoir(torch.nn.Module):
             return self.readout(temp_state)
         else:
             return temp_state.clone().detach()
+
+    def hebbian_update(self, x, y, lr = 0.001, normalize = True):
+        dA = hebbian_wta(x, y, self.adj)
+
+        # normalize values such that sum is 0 (ie mass conservation)
+        if normalize:
+            dA = dA - dA.mean(dim = 0, keepdim = True)
+
+        self.adj.data += lr * dA
         
     def train_step(self, x, labels, n_steps = 20):
         # TODO : what if the reservoir was Hebbian o_O
+        start_state = self.state.clone().detach().repeat(x.shape[0], 1)
         hidden_state = self.forward(x,
                                     n_steps = n_steps,
                                     readout = False)
+        if self.adaptive:
+            self.hebbian_update(start_state, hidden_state)
         
         error = self.readout.train_step(hidden_state,
                                         labels)
@@ -205,7 +224,7 @@ if __name__ == "__main__":
     batch_size = 256
     in_dim = 784
     dim = 1024
-    n_epochs = 3
+    n_epochs = 1
     n_labels = 10
     save_every = 10
     bias = True
@@ -221,6 +240,10 @@ if __name__ == "__main__":
                     readout = LinearReadout(dim, 
                                             n_labels, 
                                             optimizer = optimizer)).to(device)
-
-    accs, errors, y = mnist_test(net,
+    start_adj = net.adj.clone().detach()
+    accs, errors, y, details = mnist_test(net,
+                                          n_epochs = n_epochs,
+                                          batch_size = batch_size,
+                                          save_every = save_every,
                                  device = device)
+    end_adj = net.adj.clone().detach()
