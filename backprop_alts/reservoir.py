@@ -145,8 +145,12 @@ class Reservoir(torch.nn.Module):
         else:
             return temp_state.clone().detach()
 
-    def hebbian_update(self, x, y, lr = 0.001, normalize = True):
-        dA = hebbian_pca(x, y, self.adj)
+    def hebbian_update(self, x, y, lr = 0.001, normalize = True, self_avoid = False):
+        if self_avoid:
+            dA = torch.einsum("bi,bj->ij", x, y) - torch.einsum("bi,bj->ij", x, x)
+            dA /= x.shape[0]
+        else:
+            dA = hebbian_pca(x, y, self.adj)
 
         # normalize values such that sum is 0 (ie mass conservation)
         if normalize:
@@ -220,6 +224,7 @@ class LinearReadout(torch.nn.Module):
         
 if __name__ == "__main__":
     from utils import mnist_test
+    import matplotlib.pyplot as plt
 
     batch_size = 256
     in_dim = 784
@@ -247,3 +252,6 @@ if __name__ == "__main__":
                                           save_every = save_every,
                                  device = device)
     end_adj = net.adj.clone().detach()
+
+    fig, ax = plt.subplots(figsize = (10, 5))
+    im = ax.imshow(end_adj - start_adj, cmap = "RdBu")
