@@ -65,6 +65,34 @@ class Lorenz4D(torch.nn.Module):
         dwdt = self.d * y - self.e * w
         return torch.tensor([dxdt, dydt, dzdt, dwdt], dtype=torch.float64)
 
+def get_symbolic_dynamics(history, box_size = None, n_bins = 2):
+    """
+    Given a set of trajectories, returns a set of symbolic dynamics, based on gridding
+    of the phase space. 
+
+    Parameters
+    ----------
+    history : torch.Tensor
+        A tensor of shape (n_steps, n_dim) containing the trajectories.
+    box_size : numeric
+        The size of the box for gridding the phase space. Can be a scalar or a tensor of shape (n_dim,).
+    n_bins : int or iterable of ints
+        The number of bins for gridding the phase space. Can be an int or an iterable of ints of length n_dim.
+    """
+
+    if isinstance(history, list):
+        history = torch.stack(history, dim = 0)
+
+    if box_size is not None:
+        max_tensor = history.max(dim = 0)
+        min_tensor = history.min(dim = 0)
+
+        range_tensor = max_tensor - min_tensor
+        n_bins = torch.ceil(range_tensor / box_size).to(torch.int64)
+    
+    hist, bin_edges = torch.histogramdd(history, n_bins)
+    return hist, bin_edges
+
 if __name__ == "__main__":
     # test the dynamical system sampler
     import plotly.express as px

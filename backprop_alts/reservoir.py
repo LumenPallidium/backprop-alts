@@ -1,5 +1,5 @@
 import torch
-from .hebbian_learning import hebbian_wta, hebbian_pca
+from hebbian_learning import hebbian_wta, hebbian_pca
 
 def generate_directed_ER(dim,
                          link_prob = 0.5,
@@ -76,7 +76,7 @@ class Reservoir(torch.nn.Module):
     def __init__(self,
                  in_dim,
                  dim = None,
-                 inertia = 0.5,
+                 inertia = 0.2,
                  bias = True,
                  weight_range = (-1, 1),
                  bias_scale = (-1, 1),
@@ -115,7 +115,7 @@ class Reservoir(torch.nn.Module):
 
         self.readout = readout
 
-    def forward(self, x, n_steps = 20, readout = True):
+    def forward(self, x, n_steps = 1, readout = True):
         """
         Parameters
         ----------
@@ -146,7 +146,7 @@ class Reservoir(torch.nn.Module):
             return temp_state.clone().detach()
 
     def hebbian_update(self, x, y, lr = 0.001, normalize = True):
-        dA = hebbian_wta(x, y, self.adj)
+        dA = hebbian_pca(x, y, self.adj)
 
         # normalize values such that sum is 0 (ie mass conservation)
         if normalize:
@@ -165,7 +165,7 @@ class Reservoir(torch.nn.Module):
         
         error = self.readout.train_step(hidden_state,
                                         labels)
-        return error
+        return error, hidden_state
     
 class LinearReadout(torch.nn.Module):
     def __init__(self,
@@ -224,7 +224,7 @@ if __name__ == "__main__":
     batch_size = 256
     in_dim = 784
     dim = 1024
-    n_epochs = 1
+    n_epochs = 2
     n_labels = 10
     save_every = 10
     bias = True
