@@ -39,10 +39,67 @@ def generate_directed_ER(dim,
     
     return adj.float()
 
-def generate_directed_BA(final_dim,
-                         start_dim = 256,
-                         ):
-    raise NotImplementedError
+def generate_directed_scale_free(final_dim,
+                                 start_dim = 32
+                                ):
+    """
+    Generate a random scale-free graph using a directed variant of
+    the Barabasi-Albert model.
+
+    Parameters
+    ----------
+    final_dim : int
+        Number of nodes in the graph
+    start_dim : int
+        Number of nodes in the initial graph
+    
+    Returns
+    -------
+    torch.Tensor
+        Adjacency matrix
+    """
+    A = torch.zeros((final_dim, final_dim))
+    A[:start_dim, :start_dim] = generate_directed_ER(start_dim, weighted = False)
+    # need to do a for loop because new nodes are added one by one
+    for i in range(start_dim, final_dim):
+        in_degrees = A.sum(dim = 0)
+        out_degrees = A.sum(dim = 1)
+        p_in = in_degrees / in_degrees.sum()
+        p_out = out_degrees / out_degrees.sum()
+
+        # based on BA model
+        in_vec = torch.zeros(final_dim)
+        in_indices = torch.multinomial(p_in, start_dim, replacement = False)
+        in_vec[in_indices] = 1
+
+        out_vec = torch.zeros(final_dim)
+        out_indices = torch.multinomial(p_out, start_dim, replacement = False)
+        out_vec[out_indices] = 1
+
+        A[i, :] = out_vec
+        A[:, i] = in_vec
+
+    return A
+
+def test_scale_free(dim = 2048):
+    import matplotlib.pyplot as plt
+    A = generate_directed_scale_free(dim)
+    # check that node degrees are scale-free
+    in_degrees = A.sum(dim = 0).log()
+    out_degrees = A.sum(dim = 1).log()
+    # histogram of in/out degrees
+    _, ax = plt.subplots(1, 2, figsize = (10, 5))
+    ax[0].hist(in_degrees, 
+               bins = 50,
+               density = True,
+               log = True)
+    ax[0].set_title("In-degree")
+    ax[1].hist(out_degrees, 
+               bins = 50,
+               density = True,
+               log = True)
+    ax[1].set_title("Out-degree")
+    plt.show()
 
 class Reservoir(torch.nn.Module):
     """
@@ -68,6 +125,8 @@ class Reservoir(torch.nn.Module):
         Spectral radius of the adjacency matrix
     activation : torch.nn.Module
         Activation function
+    adj_type : str
+        Type of adjacency matrix
     state : torch.Tensor
         Initial reservoir state
     readout : torch.nn.Module
@@ -82,6 +141,7 @@ class Reservoir(torch.nn.Module):
                  bias_scale = (-1, 1),
                  spectral_radius = None,
                  activation = torch.nn.Tanh(),
+                 adj_type = "scale-free",
                  state = None,
                  readout = None,
                  adaptive = True):
@@ -96,8 +156,7 @@ class Reservoir(torch.nn.Module):
         self.in_weight = torch.nn.Parameter(torch.empty((dim, in_dim)))
         torch.nn.init.uniform_(self.in_weight, weight_range[0], weight_range[1])
 
-        self.adj = torch.nn.Parameter(generate_directed_ER(dim,
-                                                           spectral_radius = spectral_radius))
+        self.adj = torch.nn.Parameter(self._init_adjacency(adj_type, spectral_radius))
         self.adj.requires_grad = False
 
         # TODO : read literature on initialization of state
@@ -114,6 +173,16 @@ class Reservoir(torch.nn.Module):
         self.activation = activation
 
         self.readout = readout
+
+    def _init_adjacency(self, adj_type, spectral_radius):
+        if adj_type == "scale-free":
+            adj = generate_directed_scale_free(self.dim)
+        elif adj_type == "ER":
+            adj = generate_directed_ER(self.dim, 
+                                       spectral_radius = spectral_radius)
+        else:
+            raise ValueError("Unknown adjacency type")
+        return adj
 
     def forward(self, x, n_steps = 1, readout = True):
         """
@@ -221,6 +290,7 @@ class LinearReadout(torch.nn.Module):
                 loss.backward()
                 self.optimizer.step()
             return [loss.item()]
+        
         
 if __name__ == "__main__":
     from utils import mnist_test
