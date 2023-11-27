@@ -83,14 +83,17 @@ class HebbianConv2d(torch.nn.Module):
     dilation : int
         Dilation of the convolutional kernel
     bias : bool
-        Whether or not to include a bias term
+        If True, then a predictive coding bias is added i.e
+        a bias so that output has zero mean and unit variance
+        (per channel)
     """
     def __init__(self,
                  in_channels,
                  out_channels,
                  kernel_size,
                  stride = 1,
-                 padding = 0):
+                 padding = 0,
+                 bias = True,):
         super().__init__()
         if isinstance(kernel_size, int):
             kernel_size = (kernel_size, kernel_size)
@@ -106,9 +109,23 @@ class HebbianConv2d(torch.nn.Module):
 
         self.weight = torch.randn(out_channels, in_channels, kernel_size[0], kernel_size[1])
 
+        self.bias = torch.zeros(1, in_channels, 1, 1)
+        self.sd = torch.ones(1, in_channels, 1, 1)
+        if bias:
+            self.update_bias = True
+        else:
+            self.update_bias = False
+
     def forward(self, x):
+        x = (x - self.bias) / (self.sd + 1e-4)
         return torch.nn.functional.conv2d(x, self.weight, stride = self.stride, padding = self.padding)
     
+    def _update_bias(self, x, lr = 0.01):
+        # try and make the bias equal the mean
+        self.bias -= lr * (x.mean(dim = (0, 2, 3), keepdim = True))
+        # if current SD is too low, then increase etc
+        self.sd += lr * (x.std(dim = (0, 2, 3), keepdim = True) - self.sd)
+        
     def train_step(self, x, lr = 0.01):
         batch_size = x.shape[0]
         x_unfolded = torch.nn.functional.unfold(x, 
@@ -130,6 +147,9 @@ class HebbianConv2d(torch.nn.Module):
         dW /= batch_size * n_blocks
 
         self.weight -= lr * dW
+
+        if self.update_bias:
+            self._update_bias(x, lr = lr)
         return y
 
 def simple_test_plots(weights, pca = False, scale_max = 5, n_clusters = 3, centers = None, points = None):
@@ -247,8 +267,9 @@ def test_conv(n_epochs = 2,
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     with torch.no_grad():
-        conv = torch.nn.Sequential(HebbianConv2d(1, mid_channels, kernel_size, stride = stride, padding = 1),
-                                   HebbianConv2d(mid_channels, out_channels, kernel_size, stride = stride, padding = 1)).to(device)
+        padding = (kernel_size - 1) // 2
+        conv = torch.nn.Sequential(HebbianConv2d(1, mid_channels, kernel_size, stride = stride, padding = padding),
+                                   HebbianConv2d(mid_channels, out_channels, kernel_size, stride = stride, padding = padding)).to(device)
         initial_weights = [x.weight.clone().detach().cpu() for x in conv]
         mnist, mnist_val, accs, errors = _prepare_for_epochs()
 
@@ -292,4 +313,4 @@ def test_conv(n_epochs = 2,
 if __name__ == "__main__":
 
     #test_simple(pca = False)
-    conv = test_conv()
+    conv = test_conv(kernel_size=7)
