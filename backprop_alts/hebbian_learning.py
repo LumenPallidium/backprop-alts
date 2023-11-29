@@ -93,7 +93,9 @@ class HebbianConv2d(torch.nn.Module):
                  kernel_size,
                  stride = 1,
                  padding = 0,
-                 bias = True,):
+                 bias = True,
+                 reg_weight = 1e-3,
+                 bias_alpha = 0.5,):
         super().__init__()
         if isinstance(kernel_size, int):
             kernel_size = (kernel_size, kernel_size)
@@ -106,27 +108,33 @@ class HebbianConv2d(torch.nn.Module):
         self.kernel_size = kernel_size
         self.stride = stride
         self.padding = padding
+        self.reg_weight = reg_weight
 
-        self.weight = torch.randn(out_channels, in_channels, kernel_size[0], kernel_size[1])
+        weight_scale = (1 / np.sqrt(in_channels * kernel_size[0] * kernel_size[1]))
+        self.weight = torch.randn(out_channels, in_channels, kernel_size[0], kernel_size[1]) * weight_scale
 
         self.bias = torch.zeros(1, in_channels, 1, 1)
         self.sd = torch.ones(1, in_channels, 1, 1)
+        self.bias_alpha = bias_alpha
         if bias:
             self.update_bias = True
         else:
             self.update_bias = False
 
     def forward(self, x):
-        x = (x - self.bias) / (self.sd + 1e-4)
+        x = (x - self.bias) / (self.sd + 1e-3)
         return torch.nn.functional.conv2d(x, self.weight, stride = self.stride, padding = self.padding)
     
-    def _update_bias(self, x, lr = 0.01):
+    def _update_bias(self, x):
+        alpha = 1 - self.bias_alpha
         # try and make the bias equal the mean
-        self.bias -= lr * (x.mean(dim = (0, 2, 3), keepdim = True))
+        self.bias.mul_(alpha).add_(self.bias_alpha * x.mean(dim = (0, 2, 3), keepdim = True))
         # if current SD is too low, then increase etc
-        self.sd += lr * (x.std(dim = (0, 2, 3), keepdim = True) - self.sd)
+        self.sd.mul_(alpha).add_(self.bias_alpha * x.std(dim = (0, 2, 3), keepdim = True))
         
     def train_step(self, x, lr = 0.01):
+        x_raw = x.clone()
+        x = (x - self.bias) / (self.sd + 1e-3)
         batch_size = x.shape[0]
         x_unfolded = torch.nn.functional.unfold(x, 
                                                 kernel_size = self.kernel_size, 
@@ -139,17 +147,24 @@ class HebbianConv2d(torch.nn.Module):
                                       k1 = self.kernel_size[0], 
                                       k2 = self.kernel_size[1])
                                       
-        y = self.forward(x)
+        y =  torch.nn.functional.conv2d(x, self.weight, stride = self.stride, padding = self.padding)
         y_unfolded = einops.rearrange(y, "... c h w -> ... c (h w)")
 
         # sum over batch and image chunks
-        dW = torch.einsum("bcnij, bkn -> kcij", x_unfolded, y_unfolded)
-        dW /= batch_size * n_blocks
+        dW = torch.einsum("bcnij, bkn -> kcij", x_unfolded, y_unfolded) / (batch_size * n_blocks)
 
-        self.weight -= lr * dW
+        # get the mean of all other channels - this is effectively a repulsion term
+        off_diag = torch.ones(self.out_channels, self.out_channels, device = self.weight.device) - torch.eye(self.out_channels, device = self.weight.device)
+        off_diag /= self.out_channels - 1
+        reg = torch.einsum("kcij,kl->lcij", self.weight, off_diag) / self.out_channels
+
+        if (torch.isnan(dW).any()) or (torch.isnan(reg).any()):
+            raise ValueError("NaN encountered in weight update")
+
+        self.weight += lr * dW - self.reg_weight * reg
 
         if self.update_bias:
-            self._update_bias(x, lr = lr)
+            self._update_bias(x_raw)
         return y
 
 def simple_test_plots(weights, pca = False, scale_max = 5, n_clusters = 3, centers = None, points = None):
@@ -252,12 +267,12 @@ def test_simple(n_iters = 1000,
         simple_test_plots(weights, pca = pca, scale_max = scale_max, n_clusters = n_clusters, centers = centers, points = points)
 
 def test_conv(n_epochs = 2,
-              kernel_size = 3,
-              stride = 2,
+              kernel_sizes = [3, 5, 7],
+              strides = [2, 3, 4],
               batch_size = 256,
-              mid_channels = 32,
-              out_channels = 64,
-              lr = 0.01,
+              channel_sizes = [1, 32, 64, 128],
+              channels_to_plot = 32,
+              lr = 0.001,
               plot = True):
     """
     Function that tests the Hebbian convolution, by plotting the filters.
@@ -267,9 +282,15 @@ def test_conv(n_epochs = 2,
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     with torch.no_grad():
-        padding = (kernel_size - 1) // 2
-        conv = torch.nn.Sequential(HebbianConv2d(1, mid_channels, kernel_size, stride = stride, padding = padding),
-                                   HebbianConv2d(mid_channels, out_channels, kernel_size, stride = stride, padding = padding)).to(device)
+        conv = []
+        for i, kernel_size in enumerate(kernel_sizes):
+            padding = (kernel_size - 1) // 2
+            conv.append(HebbianConv2d(channel_sizes[i], 
+                                      channel_sizes[i+1],
+                                      kernel_size,
+                                      stride = strides[i],
+                                      padding = padding))
+        conv = torch.nn.Sequential(*conv).to(device)
         initial_weights = [x.weight.clone().detach().cpu() for x in conv]
         mnist, mnist_val, accs, errors = _prepare_for_epochs()
 
@@ -277,22 +298,32 @@ def test_conv(n_epochs = 2,
             train_loader = torch.utils.data.DataLoader(mnist, 
                                                         batch_size = batch_size, 
                                                         shuffle = True)
-            for i, (x, y) in tqdm(enumerate(train_loader)):
+            for i, (x, label) in tqdm(enumerate(train_loader)):
                 x = x.to(device)
                 x = x.view(-1, 1, 28, 28)
                 y = x.clone()
                 for layer in conv:
                     y = layer.train_step(y, lr = lr)
+                y = y.view(batch_size, -1)
 
         weights = [x.weight.clone().detach().cpu() for x in conv]
         if plot:
             fig, ax = plt.subplots(1, 2, figsize = (14, 7))
             weight, initial_weight = [], []
 
+            max_ks = max(kernel_sizes)
+
             for i, (initial_weight_i, weight_i) in enumerate(zip(initial_weights, weights)):
                 if i > 0:
-                    initial_weight_i = initial_weight_i[0].unsqueeze(1)
-                    weight_i = weight_i[0].unsqueeze(1)
+                    initial_weight_i = initial_weight_i[0, :channels_to_plot, :, :].unsqueeze(1)
+                    weight_i = weight_i[0, :channels_to_plot, :, :].unsqueeze(1)
+                # pad to max kernel size
+                initial_weight_i = torch.nn.functional.pad(initial_weight_i, 
+                                                           (0, max_ks - initial_weight_i.shape[-1], 
+                                                            0, max_ks - initial_weight_i.shape[-2]))
+                weight_i = torch.nn.functional.pad(weight_i,
+                                                   (0, max_ks - weight_i.shape[-1], 
+                                                    0, max_ks - weight_i.shape[-2]))
                 approx_sqrt = int(np.sqrt(initial_weight_i.shape[0]))
                 initial_weight_i = make_grid(initial_weight_i, 
                                              nrow = approx_sqrt)
@@ -313,4 +344,4 @@ def test_conv(n_epochs = 2,
 if __name__ == "__main__":
 
     #test_simple(pca = False)
-    conv = test_conv(kernel_size=7)
+    conv = test_conv()
