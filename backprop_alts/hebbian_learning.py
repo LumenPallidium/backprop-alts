@@ -95,7 +95,8 @@ class HebbianConv2d(torch.nn.Module):
                  padding = 0,
                  bias = True,
                  reg_weight = 1e-3,
-                 bias_alpha = 0.5,):
+                 bias_alpha = 0.5,
+                 activation = None):
         super().__init__()
         if isinstance(kernel_size, int):
             kernel_size = (kernel_size, kernel_size)
@@ -110,6 +111,11 @@ class HebbianConv2d(torch.nn.Module):
         self.padding = padding
         self.reg_weight = reg_weight
 
+        if activation is None:
+            self.activation = torch.nn.Identity()
+        else:
+            self.activation = activation
+
         weight_scale = (1 / np.sqrt(in_channels * kernel_size[0] * kernel_size[1]))
         self.weight = torch.randn(out_channels, in_channels, kernel_size[0], kernel_size[1]) * weight_scale
 
@@ -123,7 +129,8 @@ class HebbianConv2d(torch.nn.Module):
 
     def forward(self, x):
         x = (x - self.bias) / (self.sd + 1e-3)
-        return torch.nn.functional.conv2d(x, self.weight, stride = self.stride, padding = self.padding)
+        y = torch.nn.functional.conv2d(x, self.weight, stride = self.stride, padding = self.padding)
+        return self.activation(y)
     
     def _update_bias(self, x):
         alpha = 1 - self.bias_alpha
@@ -148,10 +155,15 @@ class HebbianConv2d(torch.nn.Module):
                                       k2 = self.kernel_size[1])
                                       
         y =  torch.nn.functional.conv2d(x, self.weight, stride = self.stride, padding = self.padding)
+        y = self.activation(y)
         y_unfolded = einops.rearrange(y, "... c h w -> ... c (h w)")
 
         # sum over batch and image chunks
         dW = torch.einsum("bcnij, bkn -> kcij", x_unfolded, y_unfolded) / (batch_size * n_blocks)
+        # get weight expectation
+        y_outer = torch.einsum("bin, bjn -> ij", y_unfolded, y_unfolded) / (batch_size * n_blocks)
+        weight_expectation = torch.einsum("ac,ckij->akij", y_outer, self.weight) / self.out_channels
+        dW -= weight_expectation
 
         # get the mean of all other channels - this is effectively a repulsion term
         off_diag = torch.ones(self.out_channels, self.out_channels, device = self.weight.device) - torch.eye(self.out_channels, device = self.weight.device)
@@ -266,9 +278,11 @@ def test_simple(n_iters = 1000,
 
         simple_test_plots(weights, pca = pca, scale_max = scale_max, n_clusters = n_clusters, centers = centers, points = points)
 
-def test_conv(n_epochs = 2,
+#TODO : clean this up, split up
+def test_conv(n_epochs = 10,
               kernel_sizes = [3, 5, 7],
               strides = [2, 3, 4],
+              linear_size = 512,
               batch_size = 256,
               channel_sizes = [1, 32, 64, 128],
               channels_to_plot = 32,
@@ -291,6 +305,7 @@ def test_conv(n_epochs = 2,
                                       stride = strides[i],
                                       padding = padding))
         conv = torch.nn.Sequential(*conv).to(device)
+        linear = torch.randn(linear_size, 10)
         initial_weights = [x.weight.clone().detach().cpu() for x in conv]
         mnist, mnist_val, accs, errors = _prepare_for_epochs()
 
@@ -299,16 +314,40 @@ def test_conv(n_epochs = 2,
                                                         batch_size = batch_size, 
                                                         shuffle = True)
             for i, (x, label) in tqdm(enumerate(train_loader)):
+                step_batch = x.shape[0]
                 x = x.to(device)
                 x = x.view(-1, 1, 28, 28)
                 y = x.clone()
                 for layer in conv:
                     y = layer.train_step(y, lr = lr)
-                y = y.view(batch_size, -1)
+                y = y.view(step_batch, -1)
+
+                label_onehot = torch.nn.functional.one_hot(label, 10).float()
+                dW = hebbian_pca(y, label_onehot, linear.T)
+                linear += lr * dW.T
+
+            accs = []
+            val_loader = torch.utils.data.DataLoader(mnist_val,
+                                                     batch_size = batch_size,
+                                                     shuffle = True)
+            for i, (x, label) in tqdm(enumerate(val_loader)):
+                step_batch = x.shape[0]
+                x = x.to(device)
+                x = x.view(-1, 1, 28, 28)
+                y = x.clone()
+                for layer in conv:
+                    y = layer(y)
+                y = y.view(step_batch, -1)
+
+                label_hat = y @ linear
+                label_hat = torch.argmax(label_hat, dim = -1)
+                acc = (label == label_hat).float().mean()
+                accs.append(acc)
+            print(f"Epoch {epoch + 1} / {n_epochs} - Accuracy: {np.mean(accs)}")
 
         weights = [x.weight.clone().detach().cpu() for x in conv]
         if plot:
-            fig, ax = plt.subplots(1, 2, figsize = (14, 7))
+            fig, ax = plt.subplots(1, 2, figsize = (7, 14))
             weight, initial_weight = [], []
 
             max_ks = max(kernel_sizes)
