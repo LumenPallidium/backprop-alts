@@ -6,21 +6,27 @@ class KroneckerGATorch(torch.nn.Module):
     def __init__(self,
                  evaluation_function,
                  minimize = True,
+                 codons_per_individual = 4,
                  out_size = 8,
-                 pop_size = 100):
+                 pop_size = 100,
+                 n_elites = 10):
         super().__init__()
         self.out_size = out_size
         self.minimize = minimize
         self.pop_size = pop_size
+        self.start_codons = codons_per_individual
         self.codon_size = int(np.log(self.out_size) / np.log(2))
 
         self.fitness = evaluation_function
+        self.n_elites = n_elites
 
         building_blocks = self.generate_building_block_tensor()
         self.register_buffer("building_blocks", building_blocks)
         self.n_blocks = building_blocks.shape[0]
 
-    def generate_building_block_tensor():
+        self.population = [self.generate_individual() for _ in range(pop_size)]
+
+    def generate_building_block_tensor(self):
         """
         This function generates a 36x2x2 tensor of building blocks. Each 2x2 
         matrix satisfies the following conditions:
@@ -56,12 +62,107 @@ class KroneckerGATorch(torch.nn.Module):
         return matrix
     
     def generate_individual(self):
-        weights = torch.randn(self.pop_size)
+        weights = torch.randn(self.start_codons)
         indices = torch.randint(self.n_blocks,
-                                size = (self.pop_size, self.codon_size))
+                                size = (self.start_codons, self.codon_size))
         return weights, indices
-        
+    
+    def mutate(self,
+               individual_in,
+               weight_scale = 1,
+               new_individual_rate = 0.2,
+               codon_mutation_rate = 0.5,
+               transposition_rate = 0.05,
+               addition_rate = 0.3,
+               removal_rate = 0.2,
+               crossover_rate = 0.1):
+        """
+        Applies mutations. Weight scale determines the scale of the gaussian
+        noise added to the weights. Codon mutation rate
+        determines the rate that codons are added. Transposition rate
+        determines how frequently weights are shifted to other codons.
+        """
+        if np.random.rand() < new_individual_rate:
+            return self.generate_individual()
+        else:
+            individual = deepcopy(individual_in)
+            weights, indices = individual
+            codon_count = len(weights)
+            weights += weight_scale * torch.randn(codon_count)
 
+            # mutate the codon
+            roll = np.random.rand()
+            if roll < codon_mutation_rate:
+                i = np.random.randint(codon_count)
+                j = np.random.randint(self.codon_size)
+                indices[i, j] = np.random.randint(self.n_blocks)
+
+            # transposition weights
+            roll = np.random.rand()
+            if roll < transposition_rate:
+                i = np.random.randint(codon_count)
+                j = np.random.randint(codon_count)
+                # flip the weights
+                weights[i], weights[j] = weights[j], weights[i]
+
+            # add codes
+            roll = np.random.rand()
+            if roll < addition_rate:
+                new_codon = torch.randint(self.n_blocks, size = (self.codon_size,))
+                weights = torch.cat([weights, torch.randn(1)])
+                indices = torch.cat([indices, new_codon.unsqueeze(0)], dim = 0)
+            # removal codes
+            if len(weights) > 1:
+                roll = np.random.rand()
+                if roll < removal_rate:
+                    i = np.random.randint(codon_count)
+                    weights = torch.cat([weights[:i], weights[(i + 1):]], dim = 0)
+                    indices = torch.cat([indices[:i], indices[(i + 1):]], dim = 0)
+
+            # crossover
+            roll = np.random.rand()
+            if roll < crossover_rate:
+                other_individual = self.population[np.random.randint(self.pop_size)]
+                individual = self.crossover(individual, other_individual)
+
+            return individual
+    
+    def crossover(self, individual1, individual2):
+        weights1, indices1 = individual1
+        weights2, indices2 = individual2
+
+        shorter_genome = individual1 if len(weights1) < len(weights2) else individual2
+
+        keep_index = np.random.randint(len(shorter_genome))
+        perm = torch.randperm(len(shorter_genome))
+        subset_perm1 = perm[:keep_index]
+        subset_perm2 = perm[keep_index:]
+
+        new_weights = torch.cat([weights1[subset_perm1], weights2[subset_perm2]], dim = 0)
+        new_indices = torch.cat([indices1[subset_perm1], indices2[subset_perm2]], dim = 0)
+        
+        return new_weights, new_indices
+    
+    def select(self, population):
+        fitnesses = [self.fitness(self.geno2pheno(*individual)) for individual in population]
+        fitnesses = np.array(fitnesses)
+
+        if self.minimize:
+            fit = np.min(fitnesses)
+            selected_indices = np.argsort(fitnesses)[:self.n_elites]
+        else:
+            fit = np.max(fitnesses)
+            selected_indices = np.argsort(fitnesses)[-self.n_elites:]
+        self.best = population[selected_indices[0]]
+        return [population[i] for i in selected_indices], fit
+
+    def train_step(self):
+        population, best_error = self.select(self.population)
+        while len(population) < self.pop_size:
+            individual = self.mutate(population[np.random.randint(self.n_elites)])
+            population.append(individual)
+        self.population = population
+        return best_error
 
 BASES = {
     "1" : torch.tensor([[1., 0.], [0., 1.]]),
@@ -276,7 +377,7 @@ if __name__ == "__main__":
         error = torch.mean(torch.abs(y - goal))
         return error
     
-    ga = KroneckerGA(evaluation_function = evaluation)
+    ga = KroneckerGATorch(evaluation_function = evaluation)
 
     errors = []
     for epoch in range(n_epochs):
