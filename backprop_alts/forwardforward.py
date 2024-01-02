@@ -193,6 +193,11 @@ def mnist_test_ff(in_dim,
     return accs, errors, y, details
 
 def _collaborative_ff_train(net, data, device, n_layers, lr = 0.1, easy = False, batch_size = 256):
+    """
+    Training based on :
+    https://arxiv.org/abs/2305.12393)
+    where information is shared between layers.
+    """
     train_loader = torch.utils.data.DataLoader(data, 
                                                 batch_size = batch_size, 
                                                 shuffle = True)
@@ -216,6 +221,9 @@ def _collaborative_ff_train(net, data, device, n_layers, lr = 0.1, easy = False,
 
 def _noncollaborative_ff_train(net, data, device, n_layers, lr = 0.1, easy = False, 
                                batch_size = 256):
+    """
+    Standard training, where each layer is trained independently.
+    """
 
     time_start = time()
     for layer_i in range(n_layers):
