@@ -287,6 +287,8 @@ if __name__ == "__main__":
     n_steps = 100000
     bptt_steps = 10
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # check for mps
+    device = torch.device("mps" )
 
     trigger = lambda t: t % 2 == 0
     ap = ActorPerciever().to(device)
