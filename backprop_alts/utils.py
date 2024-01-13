@@ -231,12 +231,16 @@ class ActorPerciever(torch.nn.Module):
         x, self.perciever_hidden_state = x.split(self.latent_dim, dim = -1)
         return x
     
-    def forward(self, x):
-        encoding = self.encode(x)
+    def forward(self, x, train = True):
+        encoding = self.encode(x).detach()
         action = self.act(encoding)
         # sample action based on distribution
         action_val = torch.multinomial(action, 1).squeeze()
-        perception = self.perceive(encoding, efference = action_val)
+        perception = self.perceive(encoding, efference = action_val.detach())
+        if train:
+            with torch.no_grad():
+                perception_a = self.perceive(encoding, efference = action_val)
+            return action, perception, perception_a, action_val
         return action, perception, action_val
     
     def train_step(self,
@@ -245,19 +249,21 @@ class ActorPerciever(torch.nn.Module):
                    optimizer_p,
                    optimizer_a,
                    step = False,
-                   loss = 0):
+                   loss_p = 0,
+                   loss_a = 0):
         """
         This train step method ensures compatibility with the non-backprop
         versions to be trained later.
         """
-        action, perception, action_val = self(x_tminus)
+        action, perception, perception_a, action_val = self(x_tminus)
 
         xtplus, _, done, trunc, _ = env.step(action_val)
         if done or trunc:
             print("Resetting...")
             xtplus, _ = env.reset()
             xtplus = torch.Tensor(xtplus).unsqueeze(0)
-            loss_p = torch.tensor(0, dtype = torch.float32)
+            loss_percep = torch.tensor(0, dtype = torch.float32)
+            loss_action = torch.tensor(0, dtype = torch.float32)
 
             self.actor_hidden_state = torch.zeros(1, self.hidden_dim)
             self.perciever_hidden_state = torch.zeros(1, self.hidden_dim)
@@ -265,23 +271,27 @@ class ActorPerciever(torch.nn.Module):
             xtplus = torch.Tensor(xtplus).unsqueeze(0)
             perception_plus = self.encode(xtplus)
 
-            loss_p = loss + torch.nn.functional.mse_loss(perception, perception_plus)
+            loss_percep = loss_p + torch.nn.functional.mse_loss(perception,
+                                                                perception_plus)
+            loss_action = loss_a - torch.nn.functional.mse_loss(perception_a,
+                                                                perception_plus)
+
 
             if step:
-                loss_a = -loss_p
                 optimizer_p.zero_grad()
                 optimizer_a.zero_grad()
 
-                loss_p.backward(retain_graph = True)
-                loss_a.backward()
+                loss_percep.backward(retain_graph = True)
                 optimizer_p.step()
+                loss_action.backward()
                 optimizer_a.step()
 
                 self.actor_hidden_state = self.actor_hidden_state.detach()
                 self.perciever_hidden_state = self.perciever_hidden_state.detach()
-        return xtplus, loss_p, action_val.item()
+        return xtplus, loss_percep, loss_action, action_val.item()
 
 #TODO : hebbian encoder
+#TODO : synthetic gradient
 if __name__ == "__main__":
     from gymnasium.wrappers import RecordVideo
     n_steps = 100000
@@ -293,7 +303,7 @@ if __name__ == "__main__":
     trigger = lambda t: t % 2 == 0
     ap = ActorPerciever().to(device)
     optimizer_p = torch.optim.Adam(ap.perciever.parameters(), lr = 0.01)
-    optimizer_a = torch.optim.Adam(ap.actor.parameters(), lr = 0.01)
+    optimizer_a = torch.optim.Adam(ap.actor.parameters(), lr = 0.02)
 
     base_env = gym.make("AssaultNoFrameskip-v4", render_mode = "rgb_array")
     env = RecordVideo(base_env, video_folder="../videos", episode_trigger=trigger, disable_logger=True)
@@ -301,16 +311,26 @@ if __name__ == "__main__":
     x = torch.Tensor(x).unsqueeze(0)
     losses = []
     pbar = tqdm.trange(n_steps)
-    loss = 0
+    loss_p = 0
+    loss_a = 0
 
+    action_histogram = torch.zeros(7)
     for i in range(n_steps):
         opt_step = ((i % bptt_steps) == 0) and (i > 0)
-        x, loss, act = ap.train_step(x, env, optimizer_p, optimizer_a, step = opt_step, loss = loss)
+        x, loss_p, loss_a, act = ap.train_step(x,
+                                               env,
+                                               optimizer_p,
+                                               optimizer_a,
+                                               step = opt_step,
+                                               loss_p = loss_p,
+                                               loss_a = loss_a)
+        action_histogram[act] += 1
         if opt_step:
-            losses.append(loss.item())
+            losses.append(loss_p.item())
             pbar.update(bptt_steps)
-            pbar.set_description(f"L: {round(loss.item(), 2)} A {act}")
-            loss = 0
+            pbar.set_description(f"L: {round(loss_p.item(), 4)} A {act}")
+            loss_p = 0
+            loss_a = 0
     pbar.close()
     
     losses = losses_to_running_loss(losses)
