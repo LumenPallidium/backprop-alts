@@ -86,6 +86,13 @@ class HebbianConv2d(torch.nn.Module):
         If True, then a predictive coding bias is added i.e
         a bias so that output has zero mean and unit variance
         (per channel)
+    bias_alpha : float
+        Update rate for the predictive coding bias
+    activation : torch.nn.Module
+        Activation function to apply to the output
+    wta : bool
+        If True, then a winner-take-all rule (softhebb is applied)
+        https://iopscience.iop.org/article/10.1088/2634-4386/aca710/pdf
     """
     def __init__(self,
                  in_channels,
@@ -94,9 +101,9 @@ class HebbianConv2d(torch.nn.Module):
                  stride = 1,
                  padding = 0,
                  bias = True,
-                 reg_weight = 1e-3,
                  bias_alpha = 0.5,
-                 activation = None):
+                 activation = None,
+                 wta = False):
         super().__init__()
         if isinstance(kernel_size, int):
             kernel_size = (kernel_size, kernel_size)
@@ -109,7 +116,9 @@ class HebbianConv2d(torch.nn.Module):
         self.kernel_size = kernel_size
         self.stride = stride
         self.padding = padding
-        self.reg_weight = reg_weight
+        self.wta = wta
+        if wta:
+            print("Warning: WTA not compatible with negative activation functions")
 
         if activation is None:
             self.activation = torch.nn.Identity()
@@ -158,23 +167,25 @@ class HebbianConv2d(torch.nn.Module):
         y = self.activation(y)
         y_unfolded = einops.rearrange(y, "... c h w -> ... c (h w)")
 
+        if self.wta:
+            y_unfolded = torch.functional.F.softmax(y_unfolded,
+                                                    dim = -1)
+
+            c = y_unfolded / y_unfolded.sum(dim = 0, keepdim = True)
+            y_unfolded = (c * y_unfolded)
+
         # sum over batch and image chunks
-        dW = torch.einsum("bcnij, bkn -> kcij", x_unfolded, y_unfolded) / (batch_size * n_blocks)
+        dW = torch.einsum("bcnij, bkn -> kcij", x_unfolded, y_unfolded)
         # get weight expectation
-        y_outer = torch.einsum("bin, bjn -> ij", y_unfolded, y_unfolded) / (batch_size * n_blocks)
+        y_outer = torch.einsum("bin, bjn -> ij", y_unfolded, y_unfolded)
         weight_expectation = torch.einsum("ac,ckij->akij", y_outer, self.weight) / self.out_channels
-        dW -= weight_expectation
+        dW -= weight_expectation 
+        dW /= (batch_size * n_blocks)
 
-        # get the mean of all other channels - this is effectively a repulsion term
-        off_diag = torch.ones(self.out_channels, self.out_channels, device = self.weight.device) - torch.eye(self.out_channels, device = self.weight.device)
-        off_diag /= self.out_channels - 1
-        reg = torch.einsum("kcij,kl->lcij", self.weight, off_diag) / self.out_channels
-
-        if (torch.isnan(dW).any()) or (torch.isnan(reg).any()):
+        if (torch.isnan(dW).any()):
             raise ValueError("NaN encountered in weight update")
 
-        self.weight += lr * dW - self.reg_weight * reg
-
+        self.weight += lr * dW
         if self.update_bias:
             self._update_bias(x_raw)
         return y
@@ -279,7 +290,7 @@ def test_simple(n_iters = 1000,
         simple_test_plots(weights, pca = pca, scale_max = scale_max, n_clusters = n_clusters, centers = centers, points = points)
 
 #TODO : clean this up, split up
-def test_conv(n_epochs = 10,
+def test_conv(n_epochs = 2,
               kernel_sizes = [3, 5, 7],
               strides = [2, 3, 4],
               linear_size = 512,
@@ -303,7 +314,7 @@ def test_conv(n_epochs = 10,
                                       channel_sizes[i+1],
                                       kernel_size,
                                       stride = strides[i],
-                                      padding = padding))
+                                      padding = padding,))
         conv = torch.nn.Sequential(*conv).to(device)
         linear = torch.randn(linear_size, 10)
         initial_weights = [x.weight.clone().detach().cpu() for x in conv]
