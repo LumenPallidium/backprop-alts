@@ -204,7 +204,8 @@ class PCNet(torch.nn.Module):
                  out_dim,
                  dim_mult = 1,
                  n_layers = 3,
-                 activation = torch.nn.Tanh()
+                 activation = torch.nn.Tanh(),
+                 adaptive_relaxation = False
                  ):
         super().__init__()
         self.in_dim = in_dim
@@ -212,6 +213,7 @@ class PCNet(torch.nn.Module):
             dim_mult = [dim_mult] * (n_layers - 1)
         self.dim_mult = dim_mult
         self.n_layers = n_layers
+        self.adaptive_relaxation = adaptive_relaxation
 
         self.layers = torch.nn.ModuleList()
         for i in range(n_layers - 1):
@@ -251,7 +253,7 @@ class PCNet(torch.nn.Module):
     def train_step(self, x, y, 
                    n_iters = 128, 
                    lr = 0.01,
-                   equilibration_lr = 0.01,
+                   equilibration_lr = 0.1,
                    noise_scale = 0.1):
         """
         Predictive coding training step, see Algorithm 1 in the paper:
@@ -267,6 +269,8 @@ class PCNet(torch.nn.Module):
                                     device = x_clamp.device) for layer in self.layers]
         activations[-1] = y_clamp
 
+        backward_weights = [layer.weight.T for layer in self.layers]
+
         # equilibration stage
         for i in range(n_iters):
             # this is different from paper, i merged the forward + update loops to 1 for efficiency
@@ -280,9 +284,13 @@ class PCNet(torch.nn.Module):
                 if j == 0:
                     continue
                 
-                prev_layer = self.layers[j]
+                back_weight = backward_weights[j]
                 grad = self.activation_derivative(activations[j])
-                dx = grad * (prev_layer.weight.T @ errors[j].T).T
+                dx = grad * (back_weight @ errors[j].T).T
+
+                if self.adaptive_relaxation:
+                    back_weight += lr * equilibration_lr * (activations[j].T @ errors[j]) / x.shape[0]
+                    backward_weights[j] = back_weight
 
                 activations[j] += equilibration_lr * (dx - errors[j - 1])
 
@@ -292,7 +300,6 @@ class PCNet(torch.nn.Module):
             self.layers[i].weight += dW
 
         return error # final error
-
 
 #TODO : the backwards prediction is always the same for each digit for BDPredictiveCoder?
 #TODO : can i add intelligent stochasticity for variable prediction?
@@ -304,6 +311,7 @@ if __name__ == "__main__":
     from torchvision import datasets, transforms
     from torchvision.utils import make_grid
     import matplotlib.pyplot as plt
+    import numpy as np
     from utils import mnist_test
 
     batch_size = 256
@@ -316,12 +324,18 @@ if __name__ == "__main__":
     whiten = True
     n_layers = 3
     activation = torch.nn.Tanh()
+    adaptive_relax = True
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    net = BDPredictiveCoder(in_dim, n_labels, dim_multiplier, activation = activation).to(device)
 
-    accs, errors, y = mnist_test(net,
-                                 device = device)
+    net = PCNet(in_dim,
+                n_labels,
+                dim_multiplier,
+                activation = activation,
+                n_layers = n_layers,
+                adaptive_relaxation = adaptive_relax).to(device)
+    accs, errors, y, details = mnist_test(net,
+                                device = device)
 
     # plots the backward predictions
     if isinstance(net, BDPredictiveCoder):

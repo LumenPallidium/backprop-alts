@@ -29,6 +29,19 @@ def _prepare_for_epochs():
 
     return mnist, mnist_val, accs, errors
 
+def run_val(net, val_loader, n_labels, epoch_accs, device):
+    for i, (x, y) in tqdm.tqdm(enumerate(val_loader)):
+        x = x.to(device)
+        y = y.to(device)
+        y_copy = y.clone().detach()
+        y = torch.nn.functional.one_hot(y, num_classes = n_labels)
+
+        y_hat = net(x)
+        y_out = torch.argmax(y_hat, dim = 1)
+        acc = (y_out == y_copy).float().mean()
+        epoch_accs.append(acc.item())
+    return epoch_accs
+
 def mnist_test(net,
                batch_size = 256, 
                n_epochs = 3, 
@@ -55,16 +68,11 @@ def mnist_test(net,
                                                         shuffle = True)
             epoch_accs = []
 
-            for i, (x, y) in tqdm(enumerate(val_loader)):
-                x = x.to(device)
-                y = y.to(device)
-                y_copy = y.clone().detach()
-                y = torch.nn.functional.one_hot(y, num_classes = n_labels)
-
-                y_hat = net(x)
-                y_out = torch.argmax(y_hat, dim = 1)
-                acc = (y_out == y_copy).float().mean()
-                epoch_accs.append(acc.item())
+            epoch_accs = run_val(net,
+                                 val_loader,
+                                 n_labels,
+                                 epoch_accs,
+                                 device)
 
             print(f"Epoch {epoch} Accuracy: {np.mean(epoch_accs)}")
             details["epoch_accs"].append(np.mean(epoch_accs))
@@ -72,7 +80,7 @@ def mnist_test(net,
             accs.extend(epoch_accs)
 
             start = time()
-            for i, (x, y) in tqdm(enumerate(train_loader)):
+            for i, (x, y) in tqdm.tqdm(enumerate(train_loader)):
                 x = x.to(device)
                 y = y.to(device)
                 y = torch.nn.functional.one_hot(y, num_classes = n_labels)
@@ -81,10 +89,22 @@ def mnist_test(net,
 
                 if i % save_every == 0:
                     errors.append(error[0])
+                    
             epoch_time = time() - start
 
             details["epoch_times"].append(epoch_time)
             details["epoch_samples"].append(i * batch_size)
+
+        # do final validation
+        epoch_accs = []
+        epoch_accs = run_val(net,
+                             val_loader,
+                             n_labels,
+                             epoch_accs,
+                             device)
+        print(f"Final Accuracy: {np.mean(epoch_accs)}")
+        details["epoch_accs"].append(np.mean(epoch_accs))
+        accs.extend(epoch_accs)
 
         return accs, errors, y, details
     
