@@ -213,13 +213,36 @@ class ActorPerciever(torch.nn.Module):
         hidden_state = torch.zeros(1, hidden_dim)
         self.register_buffer("actor_hidden_state", hidden_state)
 
-        perciever = [torch.nn.Linear(latent_dim + hidden_dim, latent_dim + hidden_dim) for i in range(perciever_depth)]
+        perciever = [torch.nn.Linear(latent_dim + hidden_dim, latent_dim + hidden_dim) for i in range(perciever_depth- 1)]
         self.perciever = torch.nn.ModuleList(perciever)
 
         hidden_state = torch.zeros(1, hidden_dim)
         self.register_buffer("perciever_hidden_state", hidden_state)
 
-        self.efference_table = torch.nn.Embedding(n_actions, latent_dim)
+        self.perciever.efference_table = torch.nn.Embedding(n_actions, latent_dim)
+
+        # empowerment specific modules
+        source = [torch.nn.Linear(latent_dim + hidden_dim, latent_dim + hidden_dim) for i in range(actor_depth - 1)]
+        self.final_source = torch.nn.Linear(latent_dim, n_actions)
+        self.source = torch.nn.ModuleList(source)
+
+        hidden_state = torch.zeros(1, hidden_dim)
+        self.register_buffer("source_hidden_state", hidden_state)
+
+        planner = [torch.nn.Linear(2 * latent_dim, 2 * latent_dim) for i in range(actor_depth - 1)]
+        planner.append(torch.nn.Linear(2 * latent_dim, n_actions))
+        self.planner = torch.nn.ModuleList(planner)
+        
+    def run_module(self, x, module, hidden_state = None):
+        if hidden_state is not None:
+            x = torch.cat([x, hidden_state], dim = -1)
+        for layer in module:
+            x = layer(x)
+            x = self.activation(x)
+        if hidden_state is not None:
+            x, hidden_state = x.split(self.latent_dim, dim = -1)
+            return x, hidden_state
+        return x
 
     def encode(self, x):
         x = self.norm(x).permute(0, 3, 1, 2)
@@ -231,84 +254,82 @@ class ActorPerciever(torch.nn.Module):
         return x#self.softmax(x)
     
     def act(self, x):
-        x = torch.cat([x, self.actor_hidden_state], dim = -1)
-        for layer in self.actor:
-            x = layer(x)
-            x = self.activation(x)
-        act, self.actor_hidden_state = x.split(self.latent_dim, dim = -1)
+        act, self.actor_hidden_state = self.run_module(x,
+                                                       self.actor,
+                                                       hidden_state = self.actor_hidden_state)
         act = self.final_act(act)
         act = self.softmax(act / self.actor_temp)
-        return act
+        return act, torch.multinomial(act, 1).squeeze()
     
     def perceive(self, x, efference = None):
         if efference is not None:
-            x = x + self.efference_table(efference)
-        x = torch.cat([x, self.perciever_hidden_state], dim = -1)
-        for layer in self.perciever:
-            x = layer(x)
-            x = self.activation(x)
-        #x = self.softmax(x / self.perciever_temp)
-        x, self.perciever_hidden_state = x.split(self.latent_dim, dim = -1)
+            x = x + self.perciever.efference_table(efference)
+        x, self.perciever_hidden_state = self.run_module(x,
+                                                         self.perciever,
+                                                         hidden_state = self.perciever_hidden_state)
         return x
     
-    def forward(self, x, train = True):
+    def source(self, x):
+        x, self.source_hidden_state = self.run_module(x,
+                                                      self.source,
+                                                      hidden_state = self.source_hidden_state)
+        x = self.final_source(x)
+        x = self.softmax(x / self.actor_temp)
+        return x, torch.multinomial(act, 1).squeeze()
+    
+    def plan(self, x):
+        x = self.run_module(x,
+                            self.planner,
+                            hidden_state = None)
+        x = self.softmax(x / self.actor_temp)
+        return x
+    
+    def forward(self, x):
         encoding = self.encode(x).detach()
         action = self.act(encoding)
         # sample action based on distribution
         action_val = torch.multinomial(action, 1).squeeze()
-        perception = self.perceive(encoding, efference = action_val.detach())
-        if train:
-            with torch.no_grad():
-                perception_a = self.perceive(encoding, efference = action_val)
-            return action, perception, perception_a, action_val
-        return action, perception, action_val
+        return action_val
     
-    def train_step(self,
-                   x_tminus,
-                   env,
-                   optimizer_p,
-                   optimizer_a,
-                   step = False,
-                   loss_p = 0,
-                   loss_a = 0):
+    def train_steps(self,
+                    env,
+                    last_x,
+                    optimizer,
+                    bptt_steps):
         """
         This train step method ensures compatibility with the non-backprop
         versions to be trained later.
         """
-        action, perception, perception_a, action_val = self(x_tminus)
+        z_t = self.encode(last_x)
 
-        xtplus, _, done, trunc, _ = env.step(action_val)
-        if done or trunc:
-            print("Resetting...")
-            xtplus, _ = env.reset()
-            xtplus = torch.Tensor(xtplus).unsqueeze(0)
-            loss_percep = torch.tensor(0, dtype = torch.float32)
-            loss_action = torch.tensor(0, dtype = torch.float32)
+        loss = 0
+        for i in range(bptt_steps):
+            _, action = self.act(z_t)
+            source_action_probs, source_action = self.source(z_t)
+            # step the env
+            xtplus, _, done, trunc, _ = env.step(action)
+            #TODO : why isn't this used in paper?
+            z_tplus = self.encode(xtplus)
 
-            self.actor_hidden_state = torch.zeros(1, self.hidden_dim)
-            self.perciever_hidden_state = torch.zeros(1, self.hidden_dim)
-        else:
-            xtplus = torch.Tensor(xtplus).unsqueeze(0)
-            perception_plus = self.encode(xtplus)
+            state_pred_source = self.perceive(z_t, efference = source_action)
+            plan_action = self.plan(torch.cat([z_t, state_pred_source], dim = -1))
 
-            loss_percep = loss_p + torch.nn.functional.mse_loss(perception,
-                                                                perception_plus)
-            loss_action = loss_a - torch.nn.functional.mse_loss(perception_a,
-                                                                perception_plus)
+            loss += torch.log((source_action_probs / plan_action) + 1e-8).sum()
 
+            if done or trunc:
+                print("Resetting...")
+                xtplus, _ = env.reset()
+                xtplus = torch.Tensor(xtplus).unsqueeze(0)
 
-            if step:
-                optimizer_p.zero_grad()
-                optimizer_a.zero_grad()
+                self.actor_hidden_state = torch.zeros(1, self.hidden_dim)
+                self.perciever_hidden_state = torch.zeros(1, self.hidden_dim)
 
-                loss_percep.backward(retain_graph = True)
-                optimizer_p.step()
-                loss_action.backward()
-                optimizer_a.step()
+        loss.backward()
+        optimizer.step()
 
-                self.actor_hidden_state = self.actor_hidden_state.detach()
-                self.perciever_hidden_state = self.perciever_hidden_state.detach()
-        return xtplus, loss_percep, loss_action, action_val.item()
+        self.actor_hidden_state = self.actor_hidden_state.detach()
+        self.perciever_hidden_state = self.perciever_hidden_state.detach()
+        return xtplus, loss, action.item()
 
 #TODO : hebbian encoder
 #TODO : synthetic gradient
@@ -322,28 +343,21 @@ if __name__ == "__main__":
 
     trigger = lambda t: t % 2 == 0
     ap = ActorPerciever().to(device)
-    optimizer_p = torch.optim.Adam(ap.perciever.parameters(), lr = 0.01)
-    optimizer_a = torch.optim.Adam(ap.actor.parameters(), lr = 0.02)
+    optimizer = torch.optim.Adam(ap.perciever.parameters(), lr = 0.01)
 
     base_env = gym.make("AssaultNoFrameskip-v4", render_mode = "rgb_array")
     env = RecordVideo(base_env, video_folder="../videos", episode_trigger=trigger, disable_logger=True)
-    x, _ = env.reset()
-    x = torch.Tensor(x).unsqueeze(0)
+    last_x, _ = env.reset()
+    last_x = torch.Tensor(last_x).unsqueeze(0)
     losses = []
     pbar = tqdm.trange(n_steps)
-    loss_p = 0
-    loss_a = 0
 
     action_histogram = torch.zeros(7)
     for i in range(n_steps):
-        opt_step = ((i % bptt_steps) == 0) and (i > 0)
-        x, loss_p, loss_a, act = ap.train_step(x,
-                                               env,
-                                               optimizer_p,
-                                               optimizer_a,
-                                               step = opt_step,
-                                               loss_p = loss_p,
-                                               loss_a = loss_a)
+        last_x, loss, act = ap.train_steps(env,
+                                           last_x,
+                                           optimizer,
+                                           bptt_steps)
         action_histogram[act] += 1
         if opt_step:
             losses.append(loss_p.item())
