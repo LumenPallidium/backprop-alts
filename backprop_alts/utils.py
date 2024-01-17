@@ -171,8 +171,8 @@ class ActorPerciever(torch.nn.Module):
         Temperature of perciever softmax.
     actor_temp : float
         Temperature of actor softmax.
-    clip_max : float
-        Maximum gradient norm for clipping.
+    entropy_weight : float
+        Weight of entropy loss.
     """
     def __init__(self,
                  encoder_final_hw = 20,
@@ -186,7 +186,7 @@ class ActorPerciever(torch.nn.Module):
                  n_actions = 7,
                  perciever_temp = 0.1,
                  actor_temp = 0.4,
-                 clip_max = 10):
+                 entropy_weight = 0.01):
         super().__init__()
         self.latent_dim = latent_dim
         self.hidden_dim = hidden_dim
@@ -200,7 +200,7 @@ class ActorPerciever(torch.nn.Module):
         self.n_actions = n_actions
         self.perciever_temp = perciever_temp
         self.actor_temp = actor_temp
-        self.clip_max = clip_max
+        self.entropy_weight = entropy_weight
 
         mult_per_layer = int(np.exp(np.log(latent_dim / in_channels) / encoder_depth))
         in_outs = [in_channels] + [in_channels * mult_per_layer ** i for i in range(1, encoder_depth)] + [latent_dim]
@@ -217,11 +217,8 @@ class ActorPerciever(torch.nn.Module):
         hidden_state = torch.zeros(1, hidden_dim)
         self.register_buffer("actor_hidden_state", hidden_state)
 
-        perciever = [torch.nn.Linear(latent_dim + hidden_dim, latent_dim + hidden_dim) for i in range(perciever_depth- 1)]
+        perciever = [torch.nn.Linear(latent_dim, latent_dim) for i in range(perciever_depth- 1)]
         self.perciever = torch.nn.ModuleList(perciever)
-
-        hidden_state = torch.zeros(1, hidden_dim)
-        self.register_buffer("perciever_hidden_state", hidden_state)
 
         self.efference_table = torch.nn.Embedding(n_actions, latent_dim)
 
@@ -268,9 +265,9 @@ class ActorPerciever(torch.nn.Module):
     def perceive(self, x, efference = None):
         if efference is not None:
             x = x + self.efference_table(efference)
-        x, self.perciever_hidden_state = self.run_module(x,
-                                                         self.perciever,
-                                                         hidden_state = self.perciever_hidden_state)
+        x = self.run_module(x,
+                            self.perciever,
+                            hidden_state = None)
         return x
     
     def run_source(self, x):
@@ -309,13 +306,16 @@ class ActorPerciever(torch.nn.Module):
 
         loss = 0
         for i in range(bptt_steps):
-            _, action = self.act(z_t)
+            action_probs, action = self.act(z_t)
             source_action_probs, source_action = self.run_source(z_t)
 
             state_pred_source = self.perceive(z_t, efference = source_action)
             plan_action = self.plan(torch.cat([z_t, state_pred_source], dim = -1))
 
             loss += torch.log((source_action_probs / (plan_action + 1e-8)) + 1e-8).sum()
+
+            # add entropy loss on actor
+            entropy = (action_probs * torch.log(action_probs + 1e-8)).sum()
 
             # step the env according to action policy
             xtplus, _, done, trunc, _ = env.step(action)
@@ -328,25 +328,24 @@ class ActorPerciever(torch.nn.Module):
                 xtplus = xtplus.to(last_x.device)
 
                 self.actor_hidden_state = torch.zeros(1, self.hidden_dim)
-                self.perciever_hidden_state = torch.zeros(1, self.hidden_dim)
+                self.source_hidden_state = torch.zeros(1, self.hidden_dim)
             # encode next state
             z_t = self.encode(xtplus)
 
-        loss.backward(retain_graph=True)
-        torch.nn.utils.clip_grad_norm_(self.parameters(),
-                                       self.clip_max)
+        loss.backward()
         optimizer.step()
 
         self.actor_hidden_state = self.actor_hidden_state.detach()
-        self.perciever_hidden_state = self.perciever_hidden_state.detach()
+        self.source_hidden_state = self.source_hidden_state.detach()
         return xtplus, loss, action.item()
 
 #TODO : hebbian encoder
 #TODO : synthetic gradient
+#TODO : rtrl would be cool
 if __name__ == "__main__":
     from gymnasium.wrappers import RecordVideo
     n_steps = 100000
-    bptt_steps = 5
+    bptt_steps = 10
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # check for mps
     #device = torch.device("mps" if torch.backends.mps.is_available() else device)
