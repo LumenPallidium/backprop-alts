@@ -171,6 +171,8 @@ class ActorPerciever(torch.nn.Module):
         Temperature of perciever softmax.
     actor_temp : float
         Temperature of actor softmax.
+    clip_max : float
+        Maximum gradient norm for clipping.
     """
     def __init__(self,
                  encoder_final_hw = 20,
@@ -183,7 +185,8 @@ class ActorPerciever(torch.nn.Module):
                  in_channels = 3,
                  n_actions = 7,
                  perciever_temp = 0.1,
-                 actor_temp = 0.4):
+                 actor_temp = 0.4,
+                 clip_max = 10):
         super().__init__()
         self.latent_dim = latent_dim
         self.hidden_dim = hidden_dim
@@ -197,6 +200,7 @@ class ActorPerciever(torch.nn.Module):
         self.n_actions = n_actions
         self.perciever_temp = perciever_temp
         self.actor_temp = actor_temp
+        self.clip_max = clip_max
 
         mult_per_layer = int(np.exp(np.log(latent_dim / in_channels) / encoder_depth))
         in_outs = [in_channels] + [in_channels * mult_per_layer ** i for i in range(1, encoder_depth)] + [latent_dim]
@@ -219,7 +223,7 @@ class ActorPerciever(torch.nn.Module):
         hidden_state = torch.zeros(1, hidden_dim)
         self.register_buffer("perciever_hidden_state", hidden_state)
 
-        self.perciever.efference_table = torch.nn.Embedding(n_actions, latent_dim)
+        self.efference_table = torch.nn.Embedding(n_actions, latent_dim)
 
         # empowerment specific modules
         source = [torch.nn.Linear(latent_dim + hidden_dim, latent_dim + hidden_dim) for i in range(actor_depth - 1)]
@@ -263,19 +267,19 @@ class ActorPerciever(torch.nn.Module):
     
     def perceive(self, x, efference = None):
         if efference is not None:
-            x = x + self.perciever.efference_table(efference)
+            x = x + self.efference_table(efference)
         x, self.perciever_hidden_state = self.run_module(x,
                                                          self.perciever,
                                                          hidden_state = self.perciever_hidden_state)
         return x
     
-    def source(self, x):
+    def run_source(self, x):
         x, self.source_hidden_state = self.run_module(x,
                                                       self.source,
                                                       hidden_state = self.source_hidden_state)
         x = self.final_source(x)
         x = self.softmax(x / self.actor_temp)
-        return x, torch.multinomial(act, 1).squeeze()
+        return x, torch.multinomial(x, 1).squeeze()
     
     def plan(self, x):
         x = self.run_module(x,
@@ -305,26 +309,31 @@ class ActorPerciever(torch.nn.Module):
         loss = 0
         for i in range(bptt_steps):
             _, action = self.act(z_t)
-            source_action_probs, source_action = self.source(z_t)
-            # step the env
-            xtplus, _, done, trunc, _ = env.step(action)
-            #TODO : why isn't this used in paper?
-            z_tplus = self.encode(xtplus)
+            source_action_probs, source_action = self.run_source(z_t)
 
             state_pred_source = self.perceive(z_t, efference = source_action)
             plan_action = self.plan(torch.cat([z_t, state_pred_source], dim = -1))
 
-            loss += torch.log((source_action_probs / plan_action) + 1e-8).sum()
+            loss += torch.log((source_action_probs / (plan_action + 1e-8)) + 1e-8).sum()
 
+            # step the env according to action policy
+            xtplus, _, done, trunc, _ = env.step(action)
+            xtplus = torch.Tensor(xtplus).unsqueeze(0)
+            xtplus = xtplus.to(last_x.device)
             if done or trunc:
                 print("Resetting...")
                 xtplus, _ = env.reset()
                 xtplus = torch.Tensor(xtplus).unsqueeze(0)
+                xtplus = xtplus.to(last_x.device)
 
                 self.actor_hidden_state = torch.zeros(1, self.hidden_dim)
                 self.perciever_hidden_state = torch.zeros(1, self.hidden_dim)
+            # encode next state
+            z_t = self.encode(xtplus)
 
-        loss.backward()
+        loss.backward(retain_graph=True)
+        torch.nn.utils.clip_grad_norm_(self.parameters(),
+                                       self.clip_max)
         optimizer.step()
 
         self.actor_hidden_state = self.actor_hidden_state.detach()
@@ -339,7 +348,7 @@ if __name__ == "__main__":
     bptt_steps = 10
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # check for mps
-    device = torch.device("mps" )
+    #device = torch.device("mps" if torch.backends.mps.is_available() else device)
 
     trigger = lambda t: t % 2 == 0
     ap = ActorPerciever().to(device)
@@ -348,23 +357,19 @@ if __name__ == "__main__":
     base_env = gym.make("AssaultNoFrameskip-v4", render_mode = "rgb_array")
     env = RecordVideo(base_env, video_folder="../videos", episode_trigger=trigger, disable_logger=True)
     last_x, _ = env.reset()
-    last_x = torch.Tensor(last_x).unsqueeze(0)
+    last_x = torch.Tensor(last_x).unsqueeze(0).to(device)
     losses = []
     pbar = tqdm.trange(n_steps)
 
-    action_histogram = torch.zeros(7)
     for i in range(n_steps):
         last_x, loss, act = ap.train_steps(env,
                                            last_x,
                                            optimizer,
                                            bptt_steps)
-        action_histogram[act] += 1
-        if opt_step:
-            losses.append(loss_p.item())
-            pbar.update(bptt_steps)
-            pbar.set_description(f"L: {round(loss_p.item(), 4)} A {act}")
-            loss_p = 0
-            loss_a = 0
+        
+        losses.append(loss.item())
+        pbar.update(1)
+        pbar.set_description(f"Loss: {round(loss.item(), 4)}")
     pbar.close()
     
     losses = losses_to_running_loss(losses)
