@@ -304,6 +304,7 @@ class ActorPerciever(torch.nn.Module):
         This train step method ensures compatibility with the non-backprop
         versions to be trained later.
         """
+        optimizer.zero_grad()
         z_t = self.encode(last_x)
 
         loss = 0
@@ -345,7 +346,7 @@ class ActorPerciever(torch.nn.Module):
 if __name__ == "__main__":
     from gymnasium.wrappers import RecordVideo
     n_steps = 100000
-    bptt_steps = 10
+    bptt_steps = 5
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # check for mps
     #device = torch.device("mps" if torch.backends.mps.is_available() else device)
