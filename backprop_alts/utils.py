@@ -173,6 +173,8 @@ class ActorPerciever(torch.nn.Module):
         Temperature of actor softmax.
     entropy_weight : float
         Weight of entropy loss.
+    perciever_weight : float
+        Weight of perciever loss.
     """
     def __init__(self,
                  encoder_final_hw = 20,
@@ -186,7 +188,8 @@ class ActorPerciever(torch.nn.Module):
                  n_actions = 7,
                  perciever_temp = 0.1,
                  actor_temp = 0.4,
-                 entropy_weight = 0.01):
+                 entropy_weight = 0.001,
+                 perciever_weight = 1.0):
         super().__init__()
         self.latent_dim = latent_dim
         self.hidden_dim = hidden_dim
@@ -201,6 +204,7 @@ class ActorPerciever(torch.nn.Module):
         self.perciever_temp = perciever_temp
         self.actor_temp = actor_temp
         self.entropy_weight = entropy_weight
+        self.perciever_weight = perciever_weight
 
         mult_per_layer = int(np.exp(np.log(latent_dim / in_channels) / encoder_depth))
         in_outs = [in_channels] + [in_channels * mult_per_layer ** i for i in range(1, encoder_depth)] + [latent_dim]
@@ -209,6 +213,10 @@ class ActorPerciever(torch.nn.Module):
         encoder = [torch.nn.Conv2d(in_outs[i], in_outs[i + 1], kernel_size = 3, stride = 2) for i in range(encoder_depth)]
         self.final_encoder = torch.nn.Linear(encoder_final_hw, 1)
         self.encoder = torch.nn.ModuleList(encoder)
+
+        # encoder should not update with gradients
+        for param in self.encoder.parameters():
+            param.requires_grad = False
 
         actor = [torch.nn.Linear(latent_dim + hidden_dim, latent_dim + hidden_dim) for i in range(actor_depth - 1)]
         self.final_act = torch.nn.Linear(latent_dim, n_actions)
@@ -309,13 +317,15 @@ class ActorPerciever(torch.nn.Module):
             action_probs, action = self.act(z_t)
             source_action_probs, source_action = self.run_source(z_t)
 
-            state_pred_source = self.perceive(z_t, efference = source_action)
+            with torch.no_grad():
+                state_pred_source = self.perceive(z_t, efference = source_action)
             plan_action = self.plan(torch.cat([z_t, state_pred_source], dim = -1))
 
             loss += torch.log((source_action_probs / (plan_action + 1e-8)) + 1e-8).sum()
 
             # add entropy loss on actor
             entropy = (action_probs * torch.log(action_probs + 1e-8)).sum()
+            loss += self.entropy_weight * entropy
 
             # step the env according to action policy
             xtplus, _, done, trunc, _ = env.step(action)
@@ -329,9 +339,15 @@ class ActorPerciever(torch.nn.Module):
 
                 self.actor_hidden_state = torch.zeros(1, self.hidden_dim)
                 self.source_hidden_state = torch.zeros(1, self.hidden_dim)
+            # estimate next state using perciever
+            z_t_hat = self.perceive(z_t, efference = action)
             # encode next state
             z_t = self.encode(xtplus)
 
+            loss += torch.nn.functional.mse_loss(z_t_hat, z_t) * self.perciever_weight
+
+
+        loss /= bptt_steps
         loss.backward()
         optimizer.step()
 
@@ -344,8 +360,8 @@ class ActorPerciever(torch.nn.Module):
 #TODO : rtrl would be cool
 if __name__ == "__main__":
     from gymnasium.wrappers import RecordVideo
-    n_steps = 100000
-    bptt_steps = 10
+    n_steps = 10000
+    bptt_steps = 100
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # check for mps
     #device = torch.device("mps" if torch.backends.mps.is_available() else device)

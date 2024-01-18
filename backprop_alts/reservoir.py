@@ -59,6 +59,7 @@ def generate_directed_scale_free(final_dim,
         Adjacency matrix
     """
     A = torch.zeros((final_dim, final_dim))
+    # start with a random graph
     A[:start_dim, :start_dim] = generate_directed_ER(start_dim, weighted = False)
     # need to do a for loop because new nodes are added one by one
     for i in range(start_dim, final_dim):
@@ -131,6 +132,14 @@ class Reservoir(torch.nn.Module):
         Initial reservoir state
     readout : torch.nn.Module
         Readout function
+    adaptive : bool
+        Whether to update the adjacency matrix with
+        Hebbian learning
+    lr : float
+        Learning rate for Hebbian learning
+    multi_ts : bool
+        Whether to use a different learning rate for each node.
+        In proportion to node degree.
     """
     def __init__(self,
                  in_dim,
@@ -144,7 +153,9 @@ class Reservoir(torch.nn.Module):
                  adj_type = "scale-free",
                  state = None,
                  readout = None,
-                 adaptive = True):
+                 adaptive = True,
+                 lr = 0.01,
+                 multi_ts = True):
         super().__init__()
         self.in_dim = in_dim
         if dim is None:
@@ -152,12 +163,20 @@ class Reservoir(torch.nn.Module):
         self.dim = dim
         self.inertia = inertia
         self.adaptive = adaptive
+        self.multi_ts = multi_ts
 
         self.in_weight = torch.nn.Parameter(torch.empty((dim, in_dim)))
         torch.nn.init.uniform_(self.in_weight, weight_range[0], weight_range[1])
 
         self.adj = torch.nn.Parameter(self._init_adjacency(adj_type, spectral_radius))
         self.adj.requires_grad = False
+
+        # scale-free learning rate
+        if self.multi_ts:
+            log_degree_dist = torch.log(self.adj.sum(dim = 0) /self.adj.sum(dim = 0).min()) + 1
+            self.lr = lr ** log_degree_dist
+        else:
+            self.lr = lr
 
         # TODO : read literature on initialization of state
         if state is None:
@@ -214,7 +233,7 @@ class Reservoir(torch.nn.Module):
         else:
             return temp_state.clone().detach()
 
-    def hebbian_update(self, x, y, lr = 0.001, normalize = True, self_avoid = False):
+    def hebbian_update(self, x, y, normalize = True, self_avoid = False, var_scale = 1):
         if self_avoid:
             dA = torch.einsum("bi,bj->ij", x, y) - torch.einsum("bi,bj->ij", x, x)
             dA /= x.shape[0]
@@ -224,8 +243,9 @@ class Reservoir(torch.nn.Module):
         # normalize values such that sum is 0 (ie mass conservation)
         if normalize:
             dA = dA - dA.mean(dim = 0, keepdim = True)
+            dA = dA * var_scale / dA.var(keepdim = True)
 
-        self.adj.data += lr * dA
+        self.adj.data += self.lr * dA
         
     def train_step(self, x, labels, n_steps = 20):
         # TODO : what if the reservoir was Hebbian o_O
