@@ -174,10 +174,10 @@ class ActorPerciever(torch.nn.Module):
         Temperature of actor softmax.
     entropy_weight : float
         Weight of entropy loss.
-    perciever_weight : float
-        Weight of perciever loss.
     clip : float
         Gradient clipping value.
+    efference_dim : int
+        Dimensionality of efference copies.
     """
     def __init__(self,
                  encoder_final_hw = 20,
@@ -192,8 +192,8 @@ class ActorPerciever(torch.nn.Module):
                  perciever_temp = 0.1,
                  actor_temp = 0.4,
                  entropy_weight = 0.0001,
-                 perciever_weight = 1.0,
-                 clip = 1.0):
+                 clip = 1.0,
+                 efference_dim = None):
         super().__init__()
         self.latent_dim = latent_dim
         self.hidden_dim = hidden_dim
@@ -208,8 +208,11 @@ class ActorPerciever(torch.nn.Module):
         self.perciever_temp = perciever_temp
         self.actor_temp = actor_temp
         self.entropy_weight = entropy_weight
-        self.perciever_weight = perciever_weight
         self.clip = clip
+
+        if efference_dim is None:
+            efference_dim = int(np.log(n_actions))
+        self.efference_dim = efference_dim
 
         mult_per_layer = int(np.exp(np.log(latent_dim / in_channels) / encoder_depth))
         in_outs = [in_channels] + [in_channels * mult_per_layer ** i for i in range(1, encoder_depth)] + [latent_dim]
@@ -230,15 +233,15 @@ class ActorPerciever(torch.nn.Module):
         hidden_state = torch.zeros(1, hidden_dim)
         self.register_buffer("actor_hidden_state", hidden_state)
 
-        perciever = [spectral_norm(torch.nn.Linear(latent_dim, latent_dim)) for i in range(perciever_depth- 1)]
-        perciever.append(spectral_norm(torch.nn.Linear(latent_dim, latent_dim + 1)))
+        perciever = [spectral_norm(torch.nn.Linear(latent_dim + self.efference_dim, latent_dim + self.efference_dim)) for i in range(perciever_depth- 1)]
+        perciever.append(spectral_norm(torch.nn.Linear(latent_dim + self.efference_dim, latent_dim + 1)))
         self.perciever = torch.nn.ModuleList(perciever)
 
-        self.efference_table = torch.nn.Embedding(n_actions, latent_dim)
+        self.efference_table = torch.nn.Embedding(n_actions, efference_dim)
 
         # empowerment specific modules
-        source = [torch.nn.Linear(latent_dim + hidden_dim, latent_dim + hidden_dim) for i in range(actor_depth - 1)]
-        self.final_source = torch.nn.Linear(latent_dim, n_actions)
+        source = [spectral_norm(torch.nn.Linear(latent_dim + hidden_dim, latent_dim + hidden_dim)) for i in range(actor_depth - 1)]
+        self.final_source = spectral_norm(torch.nn.Linear(latent_dim, n_actions))
         self.source = torch.nn.ModuleList(source)
 
         hidden_state = torch.zeros(1, hidden_dim)
@@ -279,7 +282,7 @@ class ActorPerciever(torch.nn.Module):
     def perceive(self, x, efference = None):
         if efference is not None:
             efference_tensor = self.efference_table(efference)
-            x = x * torch.sigmoid(efference_tensor)
+            x = torch.cat([x, efference_tensor.unsqueeze(0)], dim = -1)
         x = self.run_module(x,
                             self.perciever,
                             hidden_state = None)
@@ -314,7 +317,9 @@ class ActorPerciever(torch.nn.Module):
                     optimizer_p,
                     optimizer_a,
                     bptt_steps,
-                    last_done_hat):
+                    last_done_hat,
+                    perciever_weight = 100,
+                    death_weight = 0.1):
         """
         This train step method ensures compatibility with the non-backprop
         versions to be trained later.
@@ -322,7 +327,6 @@ class ActorPerciever(torch.nn.Module):
         optimizer_a.zero_grad()
         optimizer_p.zero_grad()
         z_t = self.encode(last_x)
-        z_t_hat = z_t.detach().clone()
 
         loss_a = 0
         loss_p = 0
@@ -355,31 +359,27 @@ class ActorPerciever(torch.nn.Module):
                 self.source_hidden_state = torch.zeros(1, self.hidden_dim,
                                                        device = last_x.device)
             # estimate next state using perciever, based on previous estimate
-            z_tplus_hat, done_hat = self.perceive(z_t_hat, efference = action)
+            z_t_hat, done_hat = self.perceive(z_t, efference = action)
             # encode next actual state
             z_t = self.encode(xtplus)
 
-            loss_p += torch.nn.functional.mse_loss(z_tplus_hat, z_t) * self.perciever_weight
+            loss_p += torch.nn.functional.mse_loss(z_t_hat, z_t) * perciever_weight
             # predict "death"
             done = torch.Tensor([done]).unsqueeze(0).to(last_x.device)
-            loss_p += torch.nn.functional.binary_cross_entropy_with_logits(done_hat, done) * self.perciever_weight
+            loss_p += torch.nn.functional.binary_cross_entropy_with_logits(done_hat, done) * death_weight
 
             # avoid death (act so that less likely to be done in next step)
-            preservation = (last_done_hat - done_hat).sum()
-            loss_a += preservation
+            preservation = torch.nn.functional.binary_cross_entropy_with_logits(done_hat, last_done_hat)
+            loss_a -= preservation * death_weight
 
-            z_t_hat = z_tplus_hat
             last_done_hat = done_hat
-
 
         loss_a /= bptt_steps
         loss_p /= bptt_steps
         loss_a.backward(retain_graph = True)
-        loss_p.backward()
-
-        torch.nn.utils.clip_grad_norm_(self.parameters(), self.clip)
-
         optimizer_a.step()
+
+        loss_p.backward()      
         optimizer_p.step()
 
         self.actor_hidden_state = self.actor_hidden_state.detach()
@@ -400,7 +400,7 @@ if __name__ == "__main__":
 
     trigger = lambda t: t % 2 == 0
     ap = ActorPerciever().to(device)
-    optimizer_p = torch.optim.Adam(ap.parameters(), lr = 0.01)
+    optimizer_p = torch.optim.Adam(ap.perciever.parameters(), lr = 0.01)
     optimizer_a = torch.optim.Adam(chain(ap.actor.parameters(),
                                          ap.source.parameters(),
                                          ap.planner.parameters()),
