@@ -226,6 +226,7 @@ class ActorPerciever(torch.nn.Module):
         self.register_buffer("actor_hidden_state", hidden_state)
 
         perciever = [torch.nn.Linear(latent_dim, latent_dim) for i in range(perciever_depth- 1)]
+        perciever.append(torch.nn.Linear(latent_dim, latent_dim + 1))
         self.perciever = torch.nn.ModuleList(perciever)
 
         self.efference_table = torch.nn.Embedding(n_actions, latent_dim)
@@ -276,7 +277,8 @@ class ActorPerciever(torch.nn.Module):
         x = self.run_module(x,
                             self.perciever,
                             hidden_state = None)
-        return x
+        x, done = x.split(self.latent_dim, dim = -1)
+        return x, torch.sigmoid(done)
     
     def run_source(self, x):
         x, self.source_hidden_state = self.run_module(x,
@@ -318,7 +320,7 @@ class ActorPerciever(torch.nn.Module):
             source_action_probs, source_action = self.run_source(z_t)
 
             with torch.no_grad():
-                state_pred_source = self.perceive(z_t, efference = source_action)
+                state_pred_source, _ = self.perceive(z_t, efference = source_action)
             plan_action = self.plan(torch.cat([z_t, state_pred_source], dim = -1))
 
             loss += torch.log((source_action_probs / (plan_action + 1e-8)) + 1e-8).sum()
@@ -337,14 +339,18 @@ class ActorPerciever(torch.nn.Module):
                 xtplus = torch.Tensor(xtplus).unsqueeze(0)
                 xtplus = xtplus.to(last_x.device)
 
-                self.actor_hidden_state = torch.zeros(1, self.hidden_dim)
-                self.source_hidden_state = torch.zeros(1, self.hidden_dim)
+                self.actor_hidden_state = torch.zeros(1, self.hidden_dim,
+                                                      device = last_x.device)
+                self.source_hidden_state = torch.zeros(1, self.hidden_dim,
+                                                       device = last_x.device)
             # estimate next state using perciever
-            z_t_hat = self.perceive(z_t, efference = action)
+            z_t_hat, done_hat = self.perceive(z_t, efference = action)
             # encode next state
             z_t = self.encode(xtplus)
 
             loss += torch.nn.functional.mse_loss(z_t_hat, z_t) * self.perciever_weight
+            done = torch.Tensor([done]).unsqueeze(0).to(last_x.device)
+            loss += torch.nn.functional.binary_cross_entropy_with_logits(done_hat, done) * self.perciever_weight
 
 
         loss /= bptt_steps
