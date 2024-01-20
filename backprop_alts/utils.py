@@ -5,6 +5,7 @@ import torch
 import gymnasium as gym
 from time import time
 from torchvision import datasets, transforms
+from torch.nn.utils.parametrizations import spectral_norm
 
 def losses_to_running_loss(losses, alpha = 0.95):
     running_losses = []
@@ -175,6 +176,8 @@ class ActorPerciever(torch.nn.Module):
         Weight of entropy loss.
     perciever_weight : float
         Weight of perciever loss.
+    clip : float
+        Gradient clipping value.
     """
     def __init__(self,
                  encoder_final_hw = 20,
@@ -188,8 +191,9 @@ class ActorPerciever(torch.nn.Module):
                  n_actions = 7,
                  perciever_temp = 0.1,
                  actor_temp = 0.4,
-                 entropy_weight = 0.001,
-                 perciever_weight = 1.0):
+                 entropy_weight = 0.0001,
+                 perciever_weight = 1.0,
+                 clip = 1.0):
         super().__init__()
         self.latent_dim = latent_dim
         self.hidden_dim = hidden_dim
@@ -205,6 +209,7 @@ class ActorPerciever(torch.nn.Module):
         self.actor_temp = actor_temp
         self.entropy_weight = entropy_weight
         self.perciever_weight = perciever_weight
+        self.clip = clip
 
         mult_per_layer = int(np.exp(np.log(latent_dim / in_channels) / encoder_depth))
         in_outs = [in_channels] + [in_channels * mult_per_layer ** i for i in range(1, encoder_depth)] + [latent_dim]
@@ -225,8 +230,8 @@ class ActorPerciever(torch.nn.Module):
         hidden_state = torch.zeros(1, hidden_dim)
         self.register_buffer("actor_hidden_state", hidden_state)
 
-        perciever = [torch.nn.Linear(latent_dim, latent_dim) for i in range(perciever_depth- 1)]
-        perciever.append(torch.nn.Linear(latent_dim, latent_dim + 1))
+        perciever = [spectral_norm(torch.nn.Linear(latent_dim, latent_dim)) for i in range(perciever_depth- 1)]
+        perciever.append(spectral_norm(torch.nn.Linear(latent_dim, latent_dim + 1)))
         self.perciever = torch.nn.ModuleList(perciever)
 
         self.efference_table = torch.nn.Embedding(n_actions, latent_dim)
@@ -273,7 +278,8 @@ class ActorPerciever(torch.nn.Module):
     
     def perceive(self, x, efference = None):
         if efference is not None:
-            x = x + self.efference_table(efference)
+            efference_tensor = self.efference_table(efference)
+            x = x * torch.sigmoid(efference_tensor)
         x = self.run_module(x,
                             self.perciever,
                             hidden_state = None)
@@ -305,16 +311,21 @@ class ActorPerciever(torch.nn.Module):
     def train_steps(self,
                     env,
                     last_x,
-                    optimizer,
-                    bptt_steps):
+                    optimizer_p,
+                    optimizer_a,
+                    bptt_steps,
+                    last_done_hat):
         """
         This train step method ensures compatibility with the non-backprop
         versions to be trained later.
         """
-        optimizer.zero_grad()
+        optimizer_a.zero_grad()
+        optimizer_p.zero_grad()
         z_t = self.encode(last_x)
+        z_t_hat = z_t.detach().clone()
 
-        loss = 0
+        loss_a = 0
+        loss_p = 0
         for i in range(bptt_steps):
             action_probs, action = self.act(z_t)
             source_action_probs, source_action = self.run_source(z_t)
@@ -323,11 +334,11 @@ class ActorPerciever(torch.nn.Module):
                 state_pred_source, _ = self.perceive(z_t, efference = source_action)
             plan_action = self.plan(torch.cat([z_t, state_pred_source], dim = -1))
 
-            loss += torch.log((source_action_probs / (plan_action + 1e-8)) + 1e-8).sum()
+            loss_a += torch.log((source_action_probs / (plan_action + 1e-8)) + 1e-8).mean()
 
             # add entropy loss on actor
             entropy = (action_probs * torch.log(action_probs + 1e-8)).sum()
-            loss += self.entropy_weight * entropy
+            loss_a += self.entropy_weight * entropy
 
             # step the env according to action policy
             xtplus, _, done, trunc, _ = env.step(action)
@@ -343,28 +354,43 @@ class ActorPerciever(torch.nn.Module):
                                                       device = last_x.device)
                 self.source_hidden_state = torch.zeros(1, self.hidden_dim,
                                                        device = last_x.device)
-            # estimate next state using perciever
-            z_t_hat, done_hat = self.perceive(z_t, efference = action)
-            # encode next state
+            # estimate next state using perciever, based on previous estimate
+            z_tplus_hat, done_hat = self.perceive(z_t_hat, efference = action)
+            # encode next actual state
             z_t = self.encode(xtplus)
 
-            loss += torch.nn.functional.mse_loss(z_t_hat, z_t) * self.perciever_weight
+            loss_p += torch.nn.functional.mse_loss(z_tplus_hat, z_t) * self.perciever_weight
+            # predict "death"
             done = torch.Tensor([done]).unsqueeze(0).to(last_x.device)
-            loss += torch.nn.functional.binary_cross_entropy_with_logits(done_hat, done) * self.perciever_weight
+            loss_p += torch.nn.functional.binary_cross_entropy_with_logits(done_hat, done) * self.perciever_weight
+
+            # avoid death (act so that less likely to be done in next step)
+            preservation = (last_done_hat - done_hat).sum()
+            loss_a += preservation
+
+            z_t_hat = z_tplus_hat
+            last_done_hat = done_hat
 
 
-        loss /= bptt_steps
-        loss.backward()
-        optimizer.step()
+        loss_a /= bptt_steps
+        loss_p /= bptt_steps
+        loss_a.backward(retain_graph = True)
+        loss_p.backward()
+
+        torch.nn.utils.clip_grad_norm_(self.parameters(), self.clip)
+
+        optimizer_a.step()
+        optimizer_p.step()
 
         self.actor_hidden_state = self.actor_hidden_state.detach()
         self.source_hidden_state = self.source_hidden_state.detach()
-        return xtplus, loss, action.item()
+        return xtplus, loss_a, loss_p, action.item(), done_hat.detach()
 
 #TODO : hebbian encoder
 #TODO : synthetic gradient
 #TODO : rtrl would be cool
 if __name__ == "__main__":
+    from itertools import chain
     from gymnasium.wrappers import RecordVideo
     n_steps = 10000
     bptt_steps = 100
@@ -374,7 +400,13 @@ if __name__ == "__main__":
 
     trigger = lambda t: t % 2 == 0
     ap = ActorPerciever().to(device)
-    optimizer = torch.optim.Adam(ap.perciever.parameters(), lr = 0.01)
+    optimizer_p = torch.optim.Adam(ap.parameters(), lr = 0.01)
+    optimizer_a = torch.optim.Adam(chain(ap.actor.parameters(),
+                                         ap.source.parameters(),
+                                         ap.planner.parameters()),
+                                   lr = 0.01,
+                                   weight_decay = 0.0001)
+
 
     base_env = gym.make("AssaultNoFrameskip-v4", render_mode = "rgb_array")
     env = RecordVideo(base_env, video_folder="../videos", episode_trigger=trigger, disable_logger=True)
@@ -382,16 +414,19 @@ if __name__ == "__main__":
     last_x = torch.Tensor(last_x).unsqueeze(0).to(device)
     losses = []
     pbar = tqdm.trange(n_steps)
+    done = torch.Tensor([0]).unsqueeze(0).to(last_x.device)
 
     for i in range(n_steps):
-        last_x, loss, act = ap.train_steps(env,
-                                           last_x,
-                                           optimizer,
-                                           bptt_steps)
+        last_x, loss_a, loss_p, act, done = ap.train_steps(env,
+                                                            last_x,
+                                                            optimizer_p,
+                                                            optimizer_a,
+                                                            bptt_steps,
+                                                            done)
         
-        losses.append(loss.item())
+        losses.append(loss_a.item())
         pbar.update(1)
-        pbar.set_description(f"Loss: {round(loss.item(), 4)}")
+        pbar.set_description(f"A: {round(loss_a.item(), 4)} P: {round(loss_p.item(), 4)}")
     pbar.close()
     
     losses = losses_to_running_loss(losses)
