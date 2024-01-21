@@ -197,9 +197,8 @@ class HebbEncoder(torch.nn.Module):
                  channel_sizes = [1, 32, 64, 128],
                  linear_dim = 512,
                  out_dim = 10,
-                 activation = torch.nn.ReLU()):
+                 activation = torch.nn.GELU()):
         super().__init__()
-
         conv = []
         for i, kernel_size in enumerate(kernel_sizes):
             padding = (kernel_size - 1) // 2
@@ -215,7 +214,7 @@ class HebbEncoder(torch.nn.Module):
 
     def forward(self, x):
         x = self.conv(x)
-        x = x.view(x.shape[0], -1)
+        x = x.reshape(x.shape[0], -1)
         x = x @ self.linear
         return x
     
@@ -223,7 +222,7 @@ class HebbEncoder(torch.nn.Module):
         y = x.clone()
         for layer in self.conv:
             y = layer.train_step(y, lr = lr)
-        y = y.view(x.shape[0], -1)
+        y = y.reshape(x.shape[0], -1)
 
         if expected_output is not None:
             dW = hebbian_pca(y, expected_output, self.linear.T)
@@ -419,7 +418,7 @@ def test_conv(n_epochs = 10,
             ax[0].set_title("Initial weights")
             ax[1].set_title("Final weights")
             plt.show()
-        return conv
+        return net
 
 if __name__ == "__main__":
 

@@ -391,7 +391,6 @@ class ActorPerciever(torch.nn.Module):
 #TODO : rtrl would be cool
 if __name__ == "__main__":
     from itertools import chain
-    from hebbian_learning import hebbian_pca, HebbianConv2d
     from gymnasium.wrappers import RecordVideo
     n_steps = 10000
     bptt_steps = 100
@@ -419,11 +418,11 @@ if __name__ == "__main__":
 
     for i in range(n_steps):
         last_x, loss_a, loss_p, act, done = ap.train_steps(env,
-                                                           last_x,
-                                                           optimizer_p,
-                                                           optimizer_a,
-                                                           bptt_steps,
-                                                           done)
+                                                            last_x,
+                                                            optimizer_p,
+                                                            optimizer_a,
+                                                            bptt_steps,
+                                                            done)
         
         losses.append(loss_a.item())
         pbar.update(1)
