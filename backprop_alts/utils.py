@@ -319,7 +319,7 @@ class ActorPerciever(torch.nn.Module):
                     bptt_steps,
                     last_done_hat,
                     perciever_weight = 100,
-                    death_weight = 0.1):
+                    death_weight = 0.01):
         """
         This train step method ensures compatibility with the non-backprop
         versions to be trained later.

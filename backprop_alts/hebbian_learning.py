@@ -4,7 +4,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 from tqdm import tqdm
 
-
 def hebbian_wta(x, y, W):
     """
     Function that computes Hebbian weight update in the winner-take-all
@@ -126,10 +125,11 @@ class HebbianConv2d(torch.nn.Module):
             self.activation = activation
 
         weight_scale = (1 / np.sqrt(in_channels * kernel_size[0] * kernel_size[1]))
-        self.weight = torch.randn(out_channels, in_channels, kernel_size[0], kernel_size[1]) * weight_scale
+        weight = torch.randn(out_channels, in_channels, kernel_size[0], kernel_size[1]) * weight_scale
+        self.weight = torch.nn.Parameter(weight)
 
-        self.bias = torch.zeros(1, in_channels, 1, 1)
-        self.sd = torch.ones(1, in_channels, 1, 1)
+        self.register_buffer("bias", torch.zeros(1, in_channels, 1, 1))
+        self.register_buffer("sd", torch.ones(1, in_channels, 1, 1))
         self.bias_alpha = bias_alpha
         if bias:
             self.update_bias = True
@@ -290,7 +290,7 @@ def test_simple(n_iters = 1000,
         simple_test_plots(weights, pca = pca, scale_max = scale_max, n_clusters = n_clusters, centers = centers, points = points)
 
 #TODO : clean this up, split up
-def test_conv(n_epochs = 2,
+def test_conv(n_epochs = 10,
               kernel_sizes = [3, 5, 7],
               strides = [2, 3, 4],
               linear_size = 512,
@@ -316,7 +316,7 @@ def test_conv(n_epochs = 2,
                                       stride = strides[i],
                                       padding = padding,))
         conv = torch.nn.Sequential(*conv).to(device)
-        linear = torch.randn(linear_size, 10)
+        linear = torch.randn(linear_size, 10, device = device)
         initial_weights = [x.weight.clone().detach().cpu() for x in conv]
         mnist, mnist_val, accs, errors = _prepare_for_epochs()
 
@@ -326,7 +326,7 @@ def test_conv(n_epochs = 2,
                                                         shuffle = True)
             for i, (x, label) in tqdm(enumerate(train_loader)):
                 step_batch = x.shape[0]
-                x = x.to(device)
+                x, label = x.to(device), label.to(device)
                 x = x.view(-1, 1, 28, 28)
                 y = x.clone()
                 for layer in conv:
@@ -343,7 +343,7 @@ def test_conv(n_epochs = 2,
                                                      shuffle = True)
             for i, (x, label) in tqdm(enumerate(val_loader)):
                 step_batch = x.shape[0]
-                x = x.to(device)
+                x, label = x.to(device), label.to(device)
                 x = x.view(-1, 1, 28, 28)
                 y = x.clone()
                 for layer in conv:
@@ -352,7 +352,7 @@ def test_conv(n_epochs = 2,
 
                 label_hat = y @ linear
                 label_hat = torch.argmax(label_hat, dim = -1)
-                acc = (label == label_hat).float().mean()
+                acc = (label == label_hat).float().mean().item()
                 accs.append(acc)
             print(f"Epoch {epoch + 1} / {n_epochs} - Accuracy: {np.mean(accs)}")
 
