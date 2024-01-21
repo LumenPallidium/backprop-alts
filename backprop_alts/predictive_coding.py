@@ -9,7 +9,7 @@ class BDPredictiveBlock(torch.nn.Module):
                  whiten = False):
         """
         A bidirectional predictive coding block. Has a forward and backward layer.
-        Weights update with the generalized Hebbian learning rule.
+        Weights update with the anti-Hebbian learning rule.
 
         Parameters
         ----------

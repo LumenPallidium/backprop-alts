@@ -191,6 +191,25 @@ class HebbianConv2d(torch.nn.Module):
         return y
     
 class HebbEncoder(torch.nn.Module):
+    """
+    A simple encoder that learns via Hebbian learning. A series of convolution
+    layers leads to a final linear layer.
+
+    Parameters
+    ----------
+    kernel_sizes : list of int
+        List of kernel sizes for each convolutional layer
+    strides : list of int
+        List of strides for each convolutional layer
+    channel_sizes : list of int
+        List of channel sizes for each convolutional layer
+    linear_dim : int
+        Input dimension of the final linear layer
+    out_dim : int
+        Output dimension of the final linear layer
+    activation : torch.nn.Module
+        Activation function to apply to the output
+    """
     def __init__(self,
                  kernel_sizes = [3, 5, 7],
                  strides = [2, 3, 4],

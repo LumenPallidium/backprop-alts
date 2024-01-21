@@ -40,6 +40,7 @@ Checked means started, not done (it wouldn't be on here if it was done!). Unchec
 
 - [x] Finish RL with dynamical systems
 - [x] Finish genetic algorithms
+- [x] Finish empowerment [implementation](https://arxiv.org/abs/1710.05101)
 - [ ] Add generec and pineida-almeida
 - [ ] more plots, including depth (also store everything in pandas)
 
