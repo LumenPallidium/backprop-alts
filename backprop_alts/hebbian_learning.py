@@ -189,6 +189,50 @@ class HebbianConv2d(torch.nn.Module):
         if self.update_bias:
             self._update_bias(x_raw)
         return y
+    
+class HebbEncoder(torch.nn.Module):
+    def __init__(self,
+                 kernel_sizes = [3, 5, 7],
+                 strides = [2, 3, 4],
+                 channel_sizes = [1, 32, 64, 128],
+                 linear_dim = 512,
+                 out_dim = 10,
+                 activation = torch.nn.ReLU()):
+        super().__init__()
+
+        conv = []
+        for i, kernel_size in enumerate(kernel_sizes):
+            padding = (kernel_size - 1) // 2
+            conv.append(HebbianConv2d(channel_sizes[i], 
+                                      channel_sizes[i+1],
+                                      kernel_size,
+                                      stride = strides[i],
+                                      padding = padding,
+                                      activation = activation))
+        self.conv = torch.nn.Sequential(*conv)
+        linear = torch.randn(linear_dim, out_dim)
+        self.linear = torch.nn.Parameter(linear)
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = x.view(x.shape[0], -1)
+        x = x @ self.linear
+        return x
+    
+    def train_step(self, x, expected_output = None, lr = 0.01):
+        y = x.clone()
+        for layer in self.conv:
+            y = layer.train_step(y, lr = lr)
+        y = y.view(x.shape[0], -1)
+
+        if expected_output is not None:
+            dW = hebbian_pca(y, expected_output, self.linear.T)
+            self.linear += lr * dW.T
+        else:
+            out = y @ self.linear
+            dW = hebbian_pca(y, out, self.linear.T)
+            self.linear += lr * dW.T
+        return x
 
 def simple_test_plots(weights, pca = False, scale_max = 5, n_clusters = 3, centers = None, points = None):
     # plot weights and centers
@@ -307,17 +351,12 @@ def test_conv(n_epochs = 10,
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     with torch.no_grad():
-        conv = []
-        for i, kernel_size in enumerate(kernel_sizes):
-            padding = (kernel_size - 1) // 2
-            conv.append(HebbianConv2d(channel_sizes[i], 
-                                      channel_sizes[i+1],
-                                      kernel_size,
-                                      stride = strides[i],
-                                      padding = padding,))
-        conv = torch.nn.Sequential(*conv).to(device)
-        linear = torch.randn(linear_size, 10, device = device)
-        initial_weights = [x.weight.clone().detach().cpu() for x in conv]
+        net = HebbEncoder(kernel_sizes = kernel_sizes,
+                          strides = strides,
+                          channel_sizes = channel_sizes,
+                          linear_dim = linear_size,
+                          out_dim = 10).to(device)
+        initial_weights = [x.weight.clone().detach().cpu() for x in net.conv]
         mnist, mnist_val, accs, errors = _prepare_for_epochs()
 
         for epoch in range(n_epochs):
@@ -327,36 +366,27 @@ def test_conv(n_epochs = 10,
             for i, (x, label) in tqdm(enumerate(train_loader)):
                 step_batch = x.shape[0]
                 x, label = x.to(device), label.to(device)
-                x = x.view(-1, 1, 28, 28)
-                y = x.clone()
-                for layer in conv:
-                    y = layer.train_step(y, lr = lr)
-                y = y.view(step_batch, -1)
-
                 label_onehot = torch.nn.functional.one_hot(label, 10).float()
-                dW = hebbian_pca(y, label_onehot, linear.T)
-                linear += lr * dW.T
+                x = x.view(-1, 1, 28, 28)
+                net.train_step(x,
+                               expected_output = label_onehot,
+                               lr = lr)
 
             accs = []
             val_loader = torch.utils.data.DataLoader(mnist_val,
                                                      batch_size = batch_size,
                                                      shuffle = True)
             for i, (x, label) in tqdm(enumerate(val_loader)):
-                step_batch = x.shape[0]
                 x, label = x.to(device), label.to(device)
                 x = x.view(-1, 1, 28, 28)
-                y = x.clone()
-                for layer in conv:
-                    y = layer(y)
-                y = y.view(step_batch, -1)
 
-                label_hat = y @ linear
+                label_hat = net(x)
                 label_hat = torch.argmax(label_hat, dim = -1)
                 acc = (label == label_hat).float().mean().item()
                 accs.append(acc)
             print(f"Epoch {epoch + 1} / {n_epochs} - Accuracy: {np.mean(accs)}")
 
-        weights = [x.weight.clone().detach().cpu() for x in conv]
+        weights = [x.weight.clone().detach().cpu() for x in net.conv]
         if plot:
             fig, ax = plt.subplots(1, 2, figsize = (7, 14))
             weight, initial_weight = [], []
