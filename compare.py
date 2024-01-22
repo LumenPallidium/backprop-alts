@@ -3,11 +3,11 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.ticker import PercentFormatter
-from scipy.interpolate import make_interp_spline, BSpline
-from src.reservoir import Reservoir, LinearReadout
-from src.predictive_coding import BDPredictiveCoder, PCNet
-from src.forwardforward import mnist_test_ff
-from src.utils import mnist_test
+from scipy.interpolate import make_interp_spline
+from backprop_alts.reservoir import Reservoir, LinearReadout
+from backprop_alts.predictive_coding import BDPredictiveCoder, PCNet
+from backprop_alts.forwardforward import mnist_test_ff
+from backprop_alts.utils import mnist_test
 
 #TODO : plot layer details (like generalized eigenvalues) for each method
 #TODO : plot of accuracy by depth for each method
