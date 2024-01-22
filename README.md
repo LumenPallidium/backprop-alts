@@ -9,6 +9,7 @@ The following methods are implemented:
 * Hebbian Learning
 * Predictive coding
 * [Fast Weight Programmers](https://arxiv.org/abs/1610.06258)
+* [Generalized principal subspace projection](https://arxiv.org/abs/2302.10051)
 * Reservoir Computing
 * Genetic algorithms
 * [Forward-forward Learning](https://arxiv.org/abs/2212.13345)
@@ -65,6 +66,9 @@ Two variants are implemented here:
 
 * Bidirectional predictive coding (largely based on [this book](https://mitpress.mit.edu/9780262545617/gradient-expectations/))
 * [Feedforward predictive coding](https://pubmed.ncbi.nlm.nih.gov/28333583/)
+
+## Generalized Principal Subspace Projection (GSSP)
+This is based on a [recent paper](https://arxiv.org/abs/2302.10051) from Flatiron Institute. They derive online, non-Hebbian learning rules based on the idea of pyramidal neurons in the cerebral cortex being multicompartmental: they have distinct (apical, proximal) dendrites that integrate information from discrete neural populations. Therefore, this rule is based on learning involving integrating two seperate multidimensional signals.
 
 ## Fast Weight Programmers
 

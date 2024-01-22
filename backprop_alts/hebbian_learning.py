@@ -251,6 +251,118 @@ class HebbEncoder(torch.nn.Module):
             dW = hebbian_pca(y, out, self.linear.T)
             self.linear += lr * dW.T
         return x
+    
+#TODO : add a convergence check (and threshold)
+#TODO : add ICA (maybe not, don't want to get covariances)
+class GPSPLayer(torch.nn.Module):
+    """
+    Implementation of the generalized principal subspace projection based on
+    multicompartmental neurons with a (technically non-Hebbian) learning rule.
+    Essentially, each neuron has two compartments, with distinct inputs. It tries
+    to do correlation-like learning between the two compartments.
+
+    From the paper:
+    https://arxiv.org/abs/2302.10051
+
+    Parameters
+    ----------
+    x_dim : int
+        Dimension of the input
+    latent_dim : int
+        Dimension of the latent space
+    y_dim : int
+        Dimension of the second input
+    equilibration_lr : float
+        Learning rate for the equilibration step
+    equilibration_steps : int
+        Number of equilibration steps
+    forward_lr : float
+        Learning rate for the forward step
+    backward_ratio : float
+        Ratio of backward to forward learning rate
+    task : str
+        One of "cca", "sfa", "cpca"
+    cpca_delta : float
+        Delta for the cPCA task
+    """
+    def __init__(self,
+                 x_dim,
+                 latent_dim,
+                 y_dim = None,
+                 equilibration_lr = 0.1,
+                 equilibration_steps = 64,
+                 forward_lr = 0.01,
+                 backward_ratio = 2,
+                 task = "cca",
+                 cpca_delta = 0.1):
+        super().__init__()
+        self.valid_tasks = ["cca", "sfa", "cpca"]
+        self.x_dim = x_dim
+        if y_dim is None:
+            y_dim = 0
+        self.y_dim = y_dim
+        self.latent_dim = latent_dim
+        self.equilibration_lr = equilibration_lr
+        self.equilibration_steps = equilibration_steps
+        self.forward_lr = forward_lr
+        self.backward_ratio = backward_ratio
+        self.cpca_delta = cpca_delta
+
+        assert task in self.valid_tasks, f"Task must be one of {self.valid_tasks}"
+        self.task = task
+
+        self.W = torch.nn.Parameter(torch.randn(latent_dim, x_dim + y_dim))
+        # M is positive definite
+        M = torch.randn(latent_dim, latent_dim)
+        self.M = torch.nn.Parameter(M * M.T)
+
+    def _get_B(self, x, y = None):
+        if self.task == "cca":
+            assert y is not None, "y must be provided for CCA"
+            x = torch.cat((x, torch.zeros_like(y)), dim = -1)
+            y = torch.cat((torch.zeros_like(x), y), dim = -1)
+            xx = x @ x.T
+            yy = y @ y.T
+            B = xx + yy
+        else:
+            B = x @ x.T
+        if self.task == "cpca":
+            B *= (1 - self.cpca_delta)
+        return B
+    
+    def _generate_eta(self, x, y = None):
+        if y is not None:
+            if self.task == "cca":
+                eta = torch.cat((x, y), dim = -1)
+            if self.task == "sfa":
+                eta = x + y
+        elif self.task == "cpca":
+            eta = x * self.cpca_delta
+        else:
+            raise ValueError("y must be provided for CCA and SFA")
+        return eta
+
+    def forward(self, x, y = None):
+        eta = self._generate_eta(x, y = y)
+        eta = eta @ self.W.T
+        return eta
+    
+    def train_step(self, x, y = None):
+        eta = self._generate_eta(x, y = y)
+        zeta = eta @ self.W.T
+        # equilibrate
+        for _ in range(self.equilibration_steps - 1):
+            zeta_step = (eta @ self.W.T - zeta @ self.M)
+            zeta += self.equilibration_lr * zeta_step
+        B = self._get_B(x, y = y)
+        # update weights
+        dW = zeta @ eta.T - self.W @ B
+        self.W += 2 * self.forward_lr *dW
+
+        dM = zeta @ zeta.T - self.M
+        self.M += (self.forward_lr / self.backward_ratio) * dM
+
+        return eta
 
 def simple_test_plots(weights, pca = False, scale_max = 5, n_clusters = 3, centers = None, points = None):
     # plot weights and centers
