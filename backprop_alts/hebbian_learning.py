@@ -257,7 +257,7 @@ class HebbEncoder(torch.nn.Module):
 class GPSPLayer(torch.nn.Module):
     """
     Implementation of the generalized principal subspace projection based on
-    multicompartmental neurons with a (technically non-Hebbian) learning rule.
+    multicompartmental neurons with a local (technically non-Hebbian) learning rule.
     Essentially, each neuron has two compartments, with distinct inputs. It tries
     to do correlation-like learning between the two compartments.
 
