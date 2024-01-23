@@ -1,5 +1,6 @@
 import torch
 from hebbian_learning import hebbian_wta, hebbian_pca
+from utils import get_graph_hierarcy
 
 def generate_directed_ER(dim,
                          link_prob = 0.5,
@@ -173,8 +174,9 @@ class Reservoir(torch.nn.Module):
 
         # scale-free learning rate
         if self.multi_ts:
-            log_degree_dist = torch.log(self.adj.sum(dim = 0) /self.adj.sum(dim = 0).min()) + 1
-            self.lr = lr ** log_degree_dist
+            _, hierarchy, _ = get_graph_hierarcy(self.adj)
+            hierarchy = (hierarchy - hierarchy.min() + 1)
+            self.lr = lr ** hierarchy
         else:
             self.lr = lr
 

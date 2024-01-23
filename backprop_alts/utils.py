@@ -42,6 +42,76 @@ def conjucate_gradient(A, b, x, n_iters = 10):
             g = A.T @ r
     return x
 
+def get_graph_hierarcy(adjacency,
+                       n_iters = 10):
+    """
+    Computes hierarchy vector for a graph, roughly each node's
+    place in a hierarchy based on flow direction in a graph.
+    From:
+    https://www.nature.com/articles/s41598-021-93161-4
+
+    Parameters
+    ----------
+    adjacency : torch.Tensor
+        Adjacency matrix of graph.
+    n_iters : int
+        Number of iterations to run conjucate gradient solver.
+    
+    Returns
+    -------
+    avg_hierarchy : torch.Tensor
+        The average place of each node in the hierarchy, as a vector.
+    forward_levels : torch.Tensor
+        The level in the hiearchy of each node, based on forward flow.
+    backward_levels : torch.Tensor
+        The level in the hiearchy of each node, based on backward flow.
+    """
+    in_degree = adjacency.sum(dim = 0)
+    out_degree = adjacency.sum(dim = 1)
+
+    transpose_laplacian = (torch.diag(in_degree) - adjacency).T
+    out_laplacian = torch.diag(out_degree) - adjacency
+
+    forward_levels = conjucate_gradient(transpose_laplacian,
+                                        in_degree,
+                                        torch.zeros_like(in_degree),
+                                        n_iters = n_iters)
+    backward_levels = conjucate_gradient(out_laplacian,
+                                         out_degree,
+                                         torch.zeros_like(out_degree),
+                                         n_iters = n_iters)
+    avg_hierarchy = (forward_levels - backward_levels) / 2
+    return avg_hierarchy, forward_levels, backward_levels
+
+def hierarchical_difference(hierarchy_vector):
+    """
+    Gets the hierarchical difference matrix from the paper.
+
+    """
+
+    vector_copy = hierarchy_vector.clone().unsqueeze(0)
+    hierarchy_vector = hierarchy_vector.unsqueeze(1)
+
+    diff = hierarchy_vector - vector_copy
+    return diff
+
+def democracy_coefficents(adjacency):
+    """
+    Democracy coefficients from the paper.
+
+    They measure "how much influencers are
+    themselves influenced by others".
+    """
+    _, forward_hier, backward_hier = get_graph_hierarcy(adjacency)
+    forward_diff = hierarchical_difference(forward_hier)
+    backward_diff = hierarchical_difference(backward_hier)
+
+    # mean wrt edge weights
+    mean_fhd = (adjacency * forward_diff).sum() / adjacency.sum()
+    mean_bhd = (adjacency * backward_diff).sum() / adjacency.sum()
+
+    return 1 - mean_fhd, 1 - mean_bhd
+
 def _prepare_for_epochs():
     transform = transforms.Compose([transforms.ToTensor(),
                                     transforms.Normalize((0.5,), (0.5,)),
