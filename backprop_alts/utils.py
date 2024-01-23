@@ -15,6 +15,33 @@ def losses_to_running_loss(losses, alpha = 0.95):
         running_losses.append(running_loss)
     return running_losses
 
+def conjucate_gradient(A, b, x, n_iters = 10):
+    """
+    Simple conjucate gradient solver for 
+    min_x ||Ax - b||_2
+    """
+    with torch.no_grad():
+        r = b - A @ x
+        g = A.T @ r
+        for i in range(n_iters):
+            if torch.norm(g) < 1e-8:
+                break
+            if i == 0:
+                p = g.clone()
+            else:
+                beta = (torch.linalg.vector_norm(g) / torch.linalg.vector_norm(g_old))
+                p = g + (beta ** 2) * p
+
+            step = (A @ p)
+            alpha = (torch.linalg.vector_norm(g) / torch.linalg.vector_norm(step)) ** 2
+
+            x = x + alpha * p
+            r = r - alpha * (A @ p)
+            
+            g_old = g.clone()
+            g = A.T @ r
+    return x
+
 def _prepare_for_epochs():
     transform = transforms.Compose([transforms.ToTensor(),
                                     transforms.Normalize((0.5,), (0.5,)),
