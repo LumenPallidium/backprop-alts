@@ -5,6 +5,7 @@ import torch
 import gymnasium as gym
 from time import time
 from torchvision import datasets, transforms
+from gymnasium.wrappers import RecordVideo
 from torch.nn.utils.parametrizations import spectral_norm
 
 def losses_to_running_loss(losses, alpha = 0.95):
@@ -206,37 +207,86 @@ def mnist_test(net,
 
         return accs, errors, y, details
     
+class SimpleEncoder(torch.nn.Module):
+    def __init__(self,
+                 in_channels = 3,
+                 latent_dim = 64,
+                 encoder_depth = 5,
+                 encoder_final_hw = 20,
+                 activation = torch.nn.GELU()):
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.encoder_depth = encoder_depth
+        self.encoder_final_hw = encoder_final_hw
+
+        mult_per_layer = int(np.exp(np.log(latent_dim / in_channels) / encoder_depth))
+        in_outs = [in_channels] + [in_channels * mult_per_layer ** i for i in range(1, encoder_depth)] + [latent_dim]
+
+        self.norm = torch.nn.LayerNorm(in_channels)
+        encoder = [torch.nn.Conv2d(in_outs[i], in_outs[i + 1], kernel_size = 3, stride = 2) for i in range(encoder_depth)]
+        self.final_encoder = torch.nn.Linear(encoder_final_hw, 1)
+        self.encoder = torch.nn.ModuleList(encoder)
+        self.activation = activation
+
+        # encoder should not update with gradients
+        for param in self.encoder.parameters():
+            param.requires_grad = False
+
+    def forward(self, x):
+        x = self.norm(x).permute(0, 3, 1, 2)
+        for layer in self.encoder:
+            x = layer(x)
+            x = self.activation(x)
+        x = x.view(-1, self.latent_dim, self.encoder_final_hw)
+        x = self.final_encoder(x).squeeze(-1)
+        return x#self.softmax(x)
+    
 def atari_assault_test(net,
                        env_name = "AssaultNoFrameskip-v4",
-                       n_epochs = 3,
-                       n_labels = 10,
-                       save_every = 10,
+                       n_steps = 10000,
+                       save_every = None,
                        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")):
     
     details = {"epoch_accs" : [],
                "epoch_times" : [],
                "epoch_samples" : [],}
+    trigger = lambda t: t % 2 == 0
     
+    if save_every is None:
+        save_every = n_steps // 1000
+    
+    # fixed encoder, no learning
+    encoder = SimpleEncoder().to(device)
     net.to(device)
 
     with torch.no_grad():
 
-        env = gym.make(env_name)
-        env.reset()
         accs = []
         errors = []
 
-        for epoch in range(n_epochs):
-            epoch_accs = []
-            start = time()
-            for i in tqdm(range(1000)):
-                x = env.render(mode = "rgb_array")
-                x = torch.tensor(x, dtype = torch.float32)
-                x = x.permute(2, 0, 1)
-                x = x.unsqueeze(0)
-                x = x.to(device)
+        base_env = gym.make(env_name, render_mode = "rgb_array")
+        env = RecordVideo(base_env, video_folder="../videos", episode_trigger=trigger, disable_logger=True)
+        last_x, _ = env.reset()
+        last_x = torch.Tensor(last_x).unsqueeze(0).to(device)
+        losses = []
+        pbar = tqdm.trange(n_steps)
+        done = torch.Tensor([0]).unsqueeze(0).to(last_x.device)
 
-                #TODO
+        for i in range(n_steps):
+            encoded = encoder(last_x)
+            action_probs = net.train_step(encoded)
+            action_probs = torch.softmax(action_probs, dim = -1)
+            action = torch.multinomial(action_probs, 1).squeeze()
+
+            last_x, _, done, trunc, _ = env.step(action)
+            if done or trunc:
+                    print("Resetting...")
+                    last_x, _ = env.reset()
+            last_x = torch.Tensor(last_x).unsqueeze(0)
+            last_x = last_x.to(device)
+            
+            pbar.update(1)
+        pbar.close()
 
 class ActorPerciever(torch.nn.Module):
     """
@@ -311,17 +361,11 @@ class ActorPerciever(torch.nn.Module):
             efference_dim = int(np.log(n_actions))
         self.efference_dim = efference_dim
 
-        mult_per_layer = int(np.exp(np.log(latent_dim / in_channels) / encoder_depth))
-        in_outs = [in_channels] + [in_channels * mult_per_layer ** i for i in range(1, encoder_depth)] + [latent_dim]
-
-        self.norm = torch.nn.LayerNorm(in_channels)
-        encoder = [torch.nn.Conv2d(in_outs[i], in_outs[i + 1], kernel_size = 3, stride = 2) for i in range(encoder_depth)]
-        self.final_encoder = torch.nn.Linear(encoder_final_hw, 1)
-        self.encoder = torch.nn.ModuleList(encoder)
-
-        # encoder should not update with gradients
-        for param in self.encoder.parameters():
-            param.requires_grad = False
+        self.encoder = SimpleEncoder(in_channels = in_channels,
+                                     latent_dim = latent_dim,
+                                     encoder_depth = encoder_depth,
+                                     encoder_final_hw = encoder_final_hw,
+                                     activation = activation)
 
         actor = [torch.nn.Linear(latent_dim + hidden_dim, latent_dim + hidden_dim) for i in range(actor_depth - 1)]
         self.final_act = torch.nn.Linear(latent_dim, n_actions)
@@ -360,13 +404,7 @@ class ActorPerciever(torch.nn.Module):
         return x
 
     def encode(self, x):
-        x = self.norm(x).permute(0, 3, 1, 2)
-        for layer in self.encoder:
-            x = layer(x)
-            x = self.activation(x)
-        x = x.view(-1, self.latent_dim, self.encoder_final_hw)
-        x = self.final_encoder(x).squeeze(-1)
-        return x#self.softmax(x)
+        return self.encoder(x)
     
     def act(self, x):
         act, self.actor_hidden_state = self.run_module(x,
@@ -488,7 +526,6 @@ class ActorPerciever(torch.nn.Module):
 #TODO : rtrl would be cool
 if __name__ == "__main__":
     from itertools import chain
-    from gymnasium.wrappers import RecordVideo
     n_steps = 10000
     bptt_steps = 100
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

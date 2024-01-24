@@ -162,7 +162,6 @@ class Reservoir(torch.nn.Module):
         if dim is None:
             dim = in_dim
         self.dim = dim
-        self.inertia = inertia
         self.adaptive = adaptive
         self.multi_ts = multi_ts
 
@@ -176,9 +175,13 @@ class Reservoir(torch.nn.Module):
         if self.multi_ts:
             _, hierarchy, _ = get_graph_hierarcy(self.adj)
             hierarchy = (hierarchy - hierarchy.min() + 1)
-            self.lr = lr ** hierarchy
+            # scale-free learning rate
+            self.lr = (lr ** hierarchy).unsqueeze(0)
+            # inverse of the hierarchy
+            self.inertia = (inertia / hierarchy).unsqueeze(0)
         else:
             self.lr = lr
+            self.inertia = inertia
 
         # TODO : read literature on initialization of state
         if state is None:
@@ -192,8 +195,21 @@ class Reservoir(torch.nn.Module):
             self.bias = torch.zeros(dim)
 
         self.activation = activation
+        self.output_neurons = False
 
-        self.readout = readout
+        # readout a number of neurons
+        if isinstance(readout, int):
+            self.output_neurons = True
+            if self.multi_ts:
+                # get the middle of the hierarchy
+                hierarhcy_len = hierarchy.shape[0]
+                middle = hierarhcy_len // 2
+                indices = torch.arange(middle, middle + readout)
+            else:
+                indices = torch.randperm(dim)[:readout]
+            self.readout = indices
+        else:
+            self.readout = readout
 
     def _init_adjacency(self, adj_type, spectral_radius):
         if adj_type == "scale-free":
@@ -231,9 +247,13 @@ class Reservoir(torch.nn.Module):
         self.state.data = temp_state.data.clone().detach().mean(dim = 0)
 
         if readout and (self.readout is not None):
-            return self.readout(temp_state)
+            if self.output_neurons:
+                output = temp_state[:, self.readout]
+            else:
+                output = self.readout(temp_state)
         else:
-            return temp_state.clone().detach()
+            output = temp_state.clone().detach()
+        return output
 
     def hebbian_update(self, x, y, normalize = True, self_avoid = False, var_scale = 1):
         if self_avoid:
@@ -248,9 +268,9 @@ class Reservoir(torch.nn.Module):
             dA = dA * var_scale / dA.var(keepdim = True)
 
         self.adj.data += self.lr * dA
+        self.bias.data -= (self.lr * x).mean(dim = 0)
         
-    def train_step(self, x, labels, n_steps = 20):
-        # TODO : what if the reservoir was Hebbian o_O
+    def train_step(self, x, labels = None, n_steps = 20):
         start_state = self.state.clone().detach().repeat(x.shape[0], 1)
         hidden_state = self.forward(x,
                                     n_steps = n_steps,
@@ -258,9 +278,15 @@ class Reservoir(torch.nn.Module):
         if self.adaptive:
             self.hebbian_update(start_state, hidden_state)
         
-        error = self.readout.train_step(hidden_state,
-                                        labels)
-        return error, hidden_state
+        if (self.readout is not None):
+            if self.output_neurons:
+                output = hidden_state[:, self.readout]
+            else:
+                assert labels is not None, "Need labels to train readout"
+                output = self.readout.train_step(hidden_state,
+                                                 labels)
+            return output
+        return hidden_state
     
 class LinearReadout(torch.nn.Module):
     def __init__(self,
@@ -315,34 +341,42 @@ class LinearReadout(torch.nn.Module):
         
         
 if __name__ == "__main__":
-    from utils import mnist_test
+    from utils import mnist_test, atari_assault_test
     import matplotlib.pyplot as plt
-
+    run_mnist_test = False
     batch_size = 256
-    in_dim = 784
+    in_dim = 784 if run_mnist_test else 64
     dim = 1024
     n_epochs = 2
     n_labels = 10
+    n_actions = 7
     save_every = 10
     bias = True
     activation = torch.nn.Tanh()
     optimizer = torch.optim.Adam
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    readout_net = LinearReadout(dim, 
+                            n_labels, 
+                            optimizer = optimizer)
+    readout = n_actions if not run_mnist_test else readout_net
     
     net = Reservoir(in_dim = in_dim,
                     dim = dim,
                     bias = bias,
                     activation = activation,
-                    readout = LinearReadout(dim, 
-                                            n_labels, 
-                                            optimizer = optimizer)).to(device)
+                    readout = readout).to(device)
     start_adj = net.adj.clone().detach()
-    accs, errors, y, details = mnist_test(net,
-                                          n_epochs = n_epochs,
-                                          batch_size = batch_size,
-                                          save_every = save_every,
-                                 device = device)
+    if run_mnist_test:
+        accs, errors, y, details = mnist_test(net,
+                                            n_epochs = n_epochs,
+                                            batch_size = batch_size,
+                                            save_every = save_every,
+                                    device = device)
+    else:
+        accs, errors, y, details = atari_assault_test(net,
+                                                      device = device)
     end_adj = net.adj.clone().detach()
 
     fig, ax = plt.subplots(figsize = (10, 5))
