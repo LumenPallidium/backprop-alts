@@ -41,7 +41,9 @@ def generate_directed_ER(dim,
     return adj.float()
 
 def generate_directed_scale_free(final_dim,
-                                 start_dim = 32
+                                 start_dim = 32,
+                                 weighted = True,
+                                 weight_range = (-1, 1),
                                 ):
     """
     Generate a random scale-free graph using a directed variant of
@@ -53,6 +55,8 @@ def generate_directed_scale_free(final_dim,
         Number of nodes in the graph
     start_dim : int
         Number of nodes in the initial graph
+    weighted : bool
+        Whether the graph is weighted or not
     
     Returns
     -------
@@ -80,6 +84,10 @@ def generate_directed_scale_free(final_dim,
 
         A[i, :] = out_vec
         A[:, i] = in_vec
+
+    if weighted:
+        weights = torch.rand((final_dim, final_dim)) * (weight_range[1] - weight_range[0]) + weight_range[0]
+        A = A.float() * weights
 
     return A
 
@@ -141,11 +149,13 @@ class Reservoir(torch.nn.Module):
     multi_ts : bool
         Whether to use a different learning rate for each node.
         In proportion to node degree.
+    maintain_sparsity : bool
+        Whether to maintain sparsity of the adjacency matrix
     """
     def __init__(self,
                  in_dim,
                  dim = None,
-                 inertia = 0.2,
+                 inertia = 0.4,
                  bias = True,
                  weight_range = (-1, 1),
                  bias_scale = (-1, 1),
@@ -156,7 +166,9 @@ class Reservoir(torch.nn.Module):
                  readout = None,
                  adaptive = True,
                  lr = 0.01,
-                 multi_ts = True):
+                 multi_ts = True,
+                 maintain_sparsity = True,
+                 sparsity_eps = 1e-4):
         super().__init__()
         self.in_dim = in_dim
         if dim is None:
@@ -164,6 +176,8 @@ class Reservoir(torch.nn.Module):
         self.dim = dim
         self.adaptive = adaptive
         self.multi_ts = multi_ts
+        self.maintain_sparsity = maintain_sparsity
+        self.sparsity_eps = sparsity_eps
 
         self.in_weight = torch.nn.Parameter(torch.empty((dim, in_dim)))
         torch.nn.init.uniform_(self.in_weight, weight_range[0], weight_range[1])
@@ -178,6 +192,7 @@ class Reservoir(torch.nn.Module):
             # scale-free learning rate
             self.lr = (lr ** hierarchy).unsqueeze(0)
             # inverse of the hierarchy
+            hierarchy = hierarchy.max() - hierarchy + 1
             self.inertia = (inertia / hierarchy).unsqueeze(0)
         else:
             self.lr = lr
@@ -255,7 +270,7 @@ class Reservoir(torch.nn.Module):
             output = temp_state.clone().detach()
         return output
 
-    def hebbian_update(self, x, y, normalize = True, self_avoid = False, var_scale = 1):
+    def hebbian_update(self, x, y, normalize = False, self_avoid = False, var_scale = 1):
         if self_avoid:
             dA = torch.einsum("bi,bj->ij", x, y) - torch.einsum("bi,bj->ij", x, x)
             dA /= x.shape[0]
@@ -269,6 +284,8 @@ class Reservoir(torch.nn.Module):
 
         self.adj.data += self.lr * dA
         self.bias.data -= (self.lr * x).mean(dim = 0)
+        if self.maintain_sparsity:
+            self.adj.data[torch.abs(self.adj.data) < self.sparsity_eps] = 0
         
     def train_step(self, x, labels = None, n_steps = 20):
         start_state = self.state.clone().detach().repeat(x.shape[0], 1)
@@ -339,7 +356,7 @@ class LinearReadout(torch.nn.Module):
                 self.optimizer.step()
             return [loss.item()]
         
-        
+# TODO : "neuromodulators" - multiplier on weight update based on high level neurons
 if __name__ == "__main__":
     from utils import mnist_test, atari_assault_test
     import matplotlib.pyplot as plt
@@ -375,8 +392,7 @@ if __name__ == "__main__":
                                             save_every = save_every,
                                     device = device)
     else:
-        accs, errors, y, details = atari_assault_test(net,
-                                                      device = device)
+        atari_assault_test(net, device = device)
     end_adj = net.adj.clone().detach()
 
     fig, ax = plt.subplots(figsize = (10, 5))
