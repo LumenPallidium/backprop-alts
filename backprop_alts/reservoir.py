@@ -168,7 +168,7 @@ class Reservoir(torch.nn.Module):
                  lr = 0.01,
                  multi_ts = True,
                  maintain_sparsity = True,
-                 sparsity_eps = 1e-4):
+                 sparsity_eps = 1e-5):
         super().__init__()
         self.in_dim = in_dim
         if dim is None:
@@ -178,9 +178,6 @@ class Reservoir(torch.nn.Module):
         self.multi_ts = multi_ts
         self.maintain_sparsity = maintain_sparsity
         self.sparsity_eps = sparsity_eps
-
-        self.in_weight = torch.nn.Parameter(torch.empty((dim, in_dim)))
-        torch.nn.init.uniform_(self.in_weight, weight_range[0], weight_range[1])
 
         self.adj = torch.nn.Parameter(self._init_adjacency(adj_type, spectral_radius))
         self.adj.requires_grad = False
@@ -194,9 +191,13 @@ class Reservoir(torch.nn.Module):
             # inverse of the hierarchy
             hierarchy = hierarchy.max() - hierarchy + 1
             self.inertia = (inertia / hierarchy).unsqueeze(0)
+            # get lowest indices in hierarchy
+            lowest, inputs = torch.topk(hierarchy, in_dim)
+            self.inputs = inputs
         else:
             self.lr = lr
             self.inertia = inertia
+            self.inputs = torch.arange(in_dim)
 
         # TODO : read literature on initialization of state
         if state is None:
@@ -253,8 +254,10 @@ class Reservoir(torch.nn.Module):
         """
         temp_state = self.state.clone().detach().repeat(x.shape[0], 1)
         for i in range(n_steps):
-            new_state = self.activation(torch.nn.functional.linear(x, self.in_weight) + \
-                                        torch.nn.functional.linear(self.state, self.adj) + \
+            new_state = temp_state.clone()
+            # set the input neurons
+            new_state[:, self.inputs] = x
+            new_state = self.activation(torch.nn.functional.linear(new_state, self.adj) + \
                                         self.bias)
             temp_state.data.mul_(self.inertia).add_(new_state * (1 - self.inertia))
 
@@ -357,10 +360,12 @@ class LinearReadout(torch.nn.Module):
             return [loss.item()]
         
 # TODO : "neuromodulators" - multiplier on weight update based on high level neurons
+#TODO : hebbian empowerment
+#TODO: criticality
 if __name__ == "__main__":
     from utils import mnist_test, atari_assault_test
     import matplotlib.pyplot as plt
-    run_mnist_test = False
+    run_mnist_test = True
     batch_size = 256
     in_dim = 784 if run_mnist_test else 64
     dim = 1024
@@ -396,4 +401,4 @@ if __name__ == "__main__":
     end_adj = net.adj.clone().detach()
 
     fig, ax = plt.subplots(figsize = (10, 5))
-    im = ax.imshow(end_adj - start_adj, cmap = "RdBu")
+    im = ax.imshow(torch.abs(end_adj - start_adj), cmap = "RdBu")
