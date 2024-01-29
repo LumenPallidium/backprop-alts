@@ -375,7 +375,7 @@ class ActorPerciever(torch.nn.Module):
         self.register_buffer("actor_hidden_state", hidden_state)
 
         perciever = [spectral_norm(torch.nn.Linear(latent_dim + self.efference_dim, latent_dim + self.efference_dim)) for i in range(perciever_depth- 1)]
-        perciever.append(spectral_norm(torch.nn.Linear(latent_dim + self.efference_dim, latent_dim + 1)))
+        perciever.append(spectral_norm(torch.nn.Linear(latent_dim + self.efference_dim, 2 * latent_dim + 1)))
         self.perciever = torch.nn.ModuleList(perciever)
 
         self.efference_table = torch.nn.Embedding(n_actions, efference_dim)
@@ -421,8 +421,8 @@ class ActorPerciever(torch.nn.Module):
         x = self.run_module(x,
                             self.perciever,
                             hidden_state = None)
-        x, done = x.split(self.latent_dim, dim = -1)
-        return x, torch.sigmoid(done)
+        x, logvar, done = x.split(self.latent_dim, dim = -1)
+        return x, logvar, torch.sigmoid(done)
     
     def run_source(self, x):
         x, self.source_hidden_state = self.run_module(x,
@@ -454,6 +454,7 @@ class ActorPerciever(torch.nn.Module):
                     bptt_steps,
                     last_done_hat,
                     perciever_weight = 100,
+                    kl_div_weight = 0.01,
                     death_weight = 0.01):
         """
         This train step method ensures compatibility with the non-backprop
@@ -470,7 +471,8 @@ class ActorPerciever(torch.nn.Module):
             source_action_probs, source_action = self.run_source(z_t)
 
             with torch.no_grad():
-                state_pred_source, _ = self.perceive(z_t, efference = source_action)
+                state_pred_source, state_pred_var, _ = self.perceive(z_t, efference = source_action)
+                state_pred_source = state_pred_source + torch.randn_like(state_pred_source) * torch.exp(state_pred_var)
             plan_action = self.plan(torch.cat([z_t, state_pred_source], dim = -1))
 
             loss_a += torch.log((source_action_probs / (plan_action + 1e-8)) + 1e-8).mean()
@@ -494,13 +496,18 @@ class ActorPerciever(torch.nn.Module):
                 self.source_hidden_state = torch.zeros(1, self.hidden_dim,
                                                        device = last_x.device)
             # estimate next state using perciever, based on previous estimate
-            z_t_hat, done_hat = self.perceive(z_t, efference = action)
+            z_t_hat, z_t_hat_var, done_hat = self.perceive(z_t, efference = action)
+            z_t_hat = z_t_hat + torch.randn_like(z_t_hat) * torch.exp(z_t_hat_var)
             # encode next actual state
             z_t = self.encode(xtplus)
 
             loss_p += torch.nn.functional.mse_loss(z_t_hat, z_t) * perciever_weight
+            # add KL divergence loss
+            kl_div_loss = torch.exp(z_t_hat_var).mean() - z_t_hat_var.mean() - 1 + (z_t_hat ** 2).mean()
+            loss_p += kl_div_loss * kl_div_weight
+                                                 
             # predict "death"
-            done = torch.Tensor([done]).unsqueeze(0).to(last_x.device)
+            done = torch.Tensor([done or trunc]).unsqueeze(0).to(last_x.device)
             loss_p += torch.nn.functional.binary_cross_entropy_with_logits(done_hat, done) * death_weight
 
             # avoid death (act so that less likely to be done in next step)
@@ -526,7 +533,7 @@ class ActorPerciever(torch.nn.Module):
 #TODO : rtrl would be cool
 if __name__ == "__main__":
     from itertools import chain
-    n_steps = 10000
+    n_steps = 100000
     bptt_steps = 100
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # check for mps
