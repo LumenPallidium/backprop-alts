@@ -187,10 +187,12 @@ class Reservoir(torch.nn.Module):
             _, hierarchy, _ = get_graph_hierarcy(self.adj)
             hierarchy = (hierarchy - hierarchy.min() + 1)
             # scale-free learning rate
-            self.lr = (lr ** hierarchy).unsqueeze(0)
+            lr = (lr ** hierarchy).unsqueeze(0)
+            self.register_buffer("lr", lr)
             # inverse of the hierarchy
             hierarchy = hierarchy.max() - hierarchy + 1
-            self.inertia = (inertia / hierarchy).unsqueeze(0)
+            inertia = (inertia / hierarchy).unsqueeze(0)
+            self.register_buffer("inertia", inertia)
             # get lowest indices in hierarchy
             lowest, inputs = torch.topk(hierarchy, in_dim)
             self.inputs = inputs
@@ -365,11 +367,11 @@ class LinearReadout(torch.nn.Module):
 if __name__ == "__main__":
     from utils import mnist_test, atari_assault_test
     import matplotlib.pyplot as plt
-    run_mnist_test = True
+    run_mnist_test = False
     batch_size = 256
     in_dim = 784 if run_mnist_test else 64
     dim = 1024
-    n_epochs = 2
+    n_epochs = 2 if run_mnist_test else 100000
     n_labels = 10
     n_actions = 7
     save_every = 10
@@ -397,7 +399,9 @@ if __name__ == "__main__":
                                             save_every = save_every,
                                     device = device)
     else:
-        atari_assault_test(net, device = device)
+        atari_assault_test(net,
+                           n_steps = n_epochs,
+                           device = device)
     end_adj = net.adj.clone().detach()
 
     fig, ax = plt.subplots(figsize = (10, 5))
