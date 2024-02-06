@@ -19,6 +19,7 @@ class KroneckerGATorch(torch.nn.Module):
 
         self.fitness = evaluation_function
         self.n_elites = n_elites
+        self.best = None
 
         building_blocks = self.generate_building_block_tensor()
         self.register_buffer("building_blocks", building_blocks)
@@ -69,12 +70,12 @@ class KroneckerGATorch(torch.nn.Module):
     
     def mutate(self,
                individual_in,
-               weight_scale = 1,
+               weight_scale = 0.05,
                new_individual_rate = 0.2,
-               codon_mutation_rate = 0.5,
+               codon_mutation_rate = 0.1,
                transposition_rate = 0.05,
                addition_rate = 0.3,
-               removal_rate = 0.2,
+               removal_rate = 0.02,
                crossover_rate = 0.1):
         """
         Applies mutations. Weight scale determines the scale of the gaussian
@@ -95,7 +96,10 @@ class KroneckerGATorch(torch.nn.Module):
             if roll < codon_mutation_rate:
                 i = np.random.randint(codon_count)
                 j = np.random.randint(self.codon_size)
-                indices[i, j] = np.random.randint(self.n_blocks)
+                shift = torch.distributions.binomial.Binomial(self.n_blocks,
+                                                              0.5).sample()
+                shift -= self.n_blocks // 2
+                indices[i, j] = (indices[i, j] + shift) % self.n_blocks
 
             # transposition weights
             roll = np.random.rand()
@@ -119,6 +123,8 @@ class KroneckerGATorch(torch.nn.Module):
                     weights = torch.cat([weights[:i], weights[(i + 1):]], dim = 0)
                     indices = torch.cat([indices[:i], indices[(i + 1):]], dim = 0)
 
+            individual = weights, indices
+
             # crossover
             roll = np.random.rand()
             if roll < crossover_rate:
@@ -132,9 +138,10 @@ class KroneckerGATorch(torch.nn.Module):
         weights2, indices2 = individual2
 
         shorter_genome = individual1 if len(weights1) < len(weights2) else individual2
+        short_len = len(shorter_genome[0])
 
-        keep_index = np.random.randint(len(shorter_genome))
-        perm = torch.randperm(len(shorter_genome))
+        keep_index = np.random.randint(short_len)
+        perm = torch.randperm(short_len)
         subset_perm1 = perm[:keep_index]
         subset_perm2 = perm[keep_index:]
 
