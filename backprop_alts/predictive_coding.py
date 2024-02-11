@@ -1,4 +1,5 @@
 import torch
+from hebbian_learning import hebbian_pca
 
 class BDPredictiveBlock(torch.nn.Module):
     def __init__(self,
@@ -188,6 +189,104 @@ class BDPredictiveCoder(torch.nn.Module):
                 layer.update_backward(error, x_hat, lr = lr)
 
         return error
+    
+class BDLBlock(torch.nn.Module):
+    def __init__(self,
+                 in_dim,
+                 out_dim,
+                 dim = None,
+                 activation = torch.nn.Tanh(),
+                 bias = False,
+                 whiten = False,
+                 stateful = True):
+        """
+        A bidirectional learning block. Has forward, backward, and lateral layers.
+
+        Parameters
+        ----------
+        in_dim : int
+            The input dimension of the block.
+        out_dim : int
+            The output dimension of the block.
+        activation : torch.nn.Module
+            The activation function to use for each layer.
+        bias : bool
+            Whether to use a bias term for each layer.
+        whiten : bool
+            Whether to use a whitening term (i.e. variance normalizing) for each layer.
+        """
+        super().__init__()
+
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+        if dim is None:
+            dim = in_dim
+        self.dim = dim
+
+        self.forward_layer = torch.nn.Linear(in_dim, dim, bias = False)
+        self.backward_layer = torch.nn.Linear(out_dim, dim, bias = False)
+        self.lateral_layer = torch.nn.Linear(dim, dim, bias = False)
+
+        self.sd_forward = torch.nn.Parameter(torch.ones(in_dim))
+        self.sd_backward = torch.nn.Parameter(torch.ones(out_dim))
+        self.whiten = whiten
+
+        self.bias_forward = torch.nn.Parameter(torch.zeros(in_dim))
+        self.bias_backward = torch.nn.Parameter(torch.zeros(out_dim))
+        self.biased = bias
+
+        self.stateful = stateful
+        self.state = torch.nn.Parameter(torch.zeros(dim))
+        
+        self.activation = activation
+
+    def forward(self, x, y, lateral = None, return_all = False):
+        """
+        Parameters
+        ----------
+        x : torch.Tensor
+            The forward input.
+        y : torch.Tensor
+            The backward input.
+        lateral : torch.Tensor
+            The lateral input.
+        return_all : bool
+            Whether to hidden activation as well as the output.
+        """
+        x_h = self.forward_layer((x + self.bias_forward) / self.sd_forward)
+        y_h = self.backward_layer((y + self.bias_backward) / self.sd_backward)
+        if lateral is None:
+            lateral_h = self.lateral_layer(self.state)
+            
+        lateral_h = self.lateral_layer(lateral)
+
+        h = x_h - y_h - lateral_h
+        output = self.activation(h)
+        if self.stateful:
+            self.state = output
+
+        if return_all:
+            return output, h
+        return output
+    
+    def train_step(self, x, y, lateral = None, lr = 0.01):
+        """
+        Update weights based on a predictive coding energy functional that encourages
+        lateral and backward predictions to match the forward predictions.
+        """
+        if lateral is None:
+            lateral = self.state
+        output, h = self.forward(x, y,
+                                 lateral = lateral, return_all = True)
+
+        dF = hebbian_pca(x, h, self.forward_layer.weight)
+        dB = -hebbian_pca(y, h, self.backward_layer.weight)
+        dL = -hebbian_pca(lateral, h, self.lateral_layer.weight)
+
+        self.forward_layer.weight += lr * dF
+        self.backward_layer.weight += lr * dB
+        self.lateral_layer.weight += lr * dL
+        return output
 
 class PCNet(torch.nn.Module):
     """
@@ -316,7 +415,7 @@ if __name__ == "__main__":
 
     batch_size = 256
     in_dim = 784
-    dim_multiplier = 0.75
+    dim_multiplier = 0.33
     n_epochs = 3
     n_labels = 10
     sample_noise_scale = 0.01
