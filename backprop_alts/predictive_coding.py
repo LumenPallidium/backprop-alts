@@ -220,7 +220,7 @@ class BDLBlock(torch.nn.Module):
         self.in_dim = in_dim
         self.out_dim = out_dim
         if dim is None:
-            dim = in_dim
+            dim = out_dim
         self.dim = dim
 
         self.forward_layer = torch.nn.Linear(in_dim, dim, bias = False)
@@ -236,7 +236,7 @@ class BDLBlock(torch.nn.Module):
         self.biased = bias
 
         self.stateful = stateful
-        self.state = torch.nn.Parameter(torch.zeros(dim))
+        self.register_buffer("state", torch.zeros(dim))
         
         self.activation = activation
 
@@ -257,8 +257,8 @@ class BDLBlock(torch.nn.Module):
         y_h = self.backward_layer((y + self.bias_backward) / self.sd_backward)
         if lateral is None:
             lateral_h = self.lateral_layer(self.state)
-            
-        lateral_h = self.lateral_layer(lateral)
+        else:
+            lateral_h = self.lateral_layer(lateral)
 
         h = x_h - y_h - lateral_h
         output = self.activation(h)
@@ -276,6 +276,8 @@ class BDLBlock(torch.nn.Module):
         """
         if lateral is None:
             lateral = self.state
+        if y is None:
+            y = torch.zeros(self.out_dim, device = x.device)
         output, h = self.forward(x, y,
                                  lateral = lateral, return_all = True)
 
@@ -287,6 +289,61 @@ class BDLBlock(torch.nn.Module):
         self.backward_layer.weight += lr * dB
         self.lateral_layer.weight += lr * dL
         return output
+    
+class BDLNet(torch.nn.Module):
+    def __init__(self,
+                 in_dim,
+                 out_dim,
+                 dim_mult = 1,
+                 n_layers = 3,
+                 activation = torch.nn.Tanh(),
+                 bias = False):
+        """
+        A bidirectional learning network with forward, backward, and lateral layers that 
+        learns via Hebbian learning. The forward layers pass predictions forward and the
+        backward layers pass errors back.
+        """
+        super().__init__()
+        self.layers = torch.nn.ModuleList()
+
+        dims = [in_dim] + [int(in_dim * dim_mult) for i in range(n_layers - 1)] + [out_dim]
+
+        for i in range(len(dims) - 1):
+            self.layers.append(BDLBlock(dims[i],
+                                        dims[i + 1],
+                                        activation = activation,
+                                        bias = bias,
+                                        # require stateful for full net
+                                        stateful = True))
+
+        
+    def forward(self,
+                x,
+                target = None,
+                n_iters = 3,):
+        for i in range(n_iters):
+            x_i = x
+            for j in range(len(self.layers) - 1):
+                y = self.layers[j + 1].state
+                x_i = self.layers[j](x_i, y, return_all = False)
+
+            out = self.layers[-1](x_i, target, return_all = False)
+
+        return out
+    
+    def train_step(self, x, target, lr = 0.01):
+        prediction = self.forward(x, target = target)
+        states = [layer.state for layer in self.layers]
+        states = [x] + states + [target]
+
+        for i in range(len(self.layers)):
+            layer = self.layers[i]
+            x_i = states[i]
+            y = states[i + 2]
+
+            output = layer.train_step(x_i, y, lr = lr)
+        return output
+
 
 class PCNet(torch.nn.Module):
     """
@@ -427,12 +484,16 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    net = PCNet(in_dim,
-                n_labels,
-                dim_multiplier,
-                activation = activation,
-                n_layers = n_layers,
-                adaptive_relaxation = adaptive_relax).to(device)
+    # net = PCNet(in_dim,
+    #             n_labels,
+    #             dim_multiplier,
+    #             activation = activation,
+    #             n_layers = n_layers,
+    #             adaptive_relaxation = adaptive_relax).to(device)
+    net = BDLNet(in_dim,
+                  n_labels,
+                  dim_multiplier,
+                  n_layers = n_layers).to(device)
     accs, errors, y, details = mnist_test(net,
                                 device = device)
 
