@@ -193,8 +193,8 @@ class BDPredictiveCoder(torch.nn.Module):
 class BDLBlock(torch.nn.Module):
     def __init__(self,
                  in_dim,
-                 out_dim,
-                 dim = None,
+                 dim,
+                 back_dim,
                  activation = torch.nn.Tanh(),
                  bias = False,
                  whiten = False,
@@ -206,8 +206,10 @@ class BDLBlock(torch.nn.Module):
         ----------
         in_dim : int
             The input dimension of the block.
-        out_dim : int
+        dim : int
             The output dimension of the block.
+        back_dim : int
+            The dimension of the backward input.
         activation : torch.nn.Module
             The activation function to use for each layer.
         bias : bool
@@ -218,21 +220,20 @@ class BDLBlock(torch.nn.Module):
         super().__init__()
 
         self.in_dim = in_dim
-        self.out_dim = out_dim
-        if dim is None:
-            dim = out_dim
+        self.dim = dim
+        self.back_dim = back_dim
         self.dim = dim
 
         self.forward_layer = torch.nn.Linear(in_dim, dim, bias = False)
-        self.backward_layer = torch.nn.Linear(out_dim, dim, bias = False)
+        self.backward_layer = torch.nn.Linear(back_dim, dim, bias = False)
         self.lateral_layer = torch.nn.Linear(dim, dim, bias = False)
 
         self.sd_forward = torch.nn.Parameter(torch.ones(in_dim))
-        self.sd_backward = torch.nn.Parameter(torch.ones(out_dim))
+        self.sd_backward = torch.nn.Parameter(torch.ones(back_dim))
         self.whiten = whiten
 
         self.bias_forward = torch.nn.Parameter(torch.zeros(in_dim))
-        self.bias_backward = torch.nn.Parameter(torch.zeros(out_dim))
+        self.bias_backward = torch.nn.Parameter(torch.zeros(back_dim))
         self.biased = bias
 
         self.stateful = stateful
@@ -254,6 +255,8 @@ class BDLBlock(torch.nn.Module):
             Whether to hidden activation as well as the output.
         """
         x_h = self.forward_layer((x + self.bias_forward) / self.sd_forward)
+        if y is None:
+            y = torch.zeros(self.back_dim, device = x.device)
         y_h = self.backward_layer((y + self.bias_backward) / self.sd_backward)
         if lateral is None:
             lateral_h = self.lateral_layer(self.state)
@@ -276,8 +279,6 @@ class BDLBlock(torch.nn.Module):
         """
         if lateral is None:
             lateral = self.state
-        if y is None:
-            y = torch.zeros(self.out_dim, device = x.device)
         output, h = self.forward(x, y,
                                  lateral = lateral, return_all = True)
 
@@ -288,6 +289,7 @@ class BDLBlock(torch.nn.Module):
         self.forward_layer.weight += lr * dF
         self.backward_layer.weight += lr * dB
         self.lateral_layer.weight += lr * dL
+        
         return output
     
 class BDLNet(torch.nn.Module):
@@ -306,35 +308,50 @@ class BDLNet(torch.nn.Module):
         super().__init__()
         self.layers = torch.nn.ModuleList()
 
-        dims = [in_dim] + [int(in_dim * dim_mult) for i in range(n_layers - 1)] + [out_dim]
+        dims = [in_dim] + [int(in_dim * (dim_mult ** i)) for i in range(n_layers - 1)] + [out_dim]
 
-        for i in range(len(dims) - 1):
+        for i in range(n_layers - 1):
             self.layers.append(BDLBlock(dims[i],
                                         dims[i + 1],
+                                        dims[i + 2],
                                         activation = activation,
                                         bias = bias,
                                         # require stateful for full net
                                         stateful = True))
+            
+    def reduce_state(self):
+        """
+        When state is a batch, convert to a vector.
+        """
+        for layer in self.layers:
+            if len(layer.state.shape) > 1:
+                layer.state = layer.state.mean(dim = 0)
 
         
     def forward(self,
                 x,
                 target = None,
+                reduce_state = True,
                 n_iters = 3,):
         for i in range(n_iters):
-            x_i = x
+            x_i = x.clone().detach()
             for j in range(len(self.layers) - 1):
                 y = self.layers[j + 1].state
                 x_i = self.layers[j](x_i, y, return_all = False)
 
             out = self.layers[-1](x_i, target, return_all = False)
 
+        if reduce_state:
+            self.reduce_state()
+
         return out
     
     def train_step(self, x, target, lr = 0.01):
-        prediction = self.forward(x, target = target)
+        prediction = self.forward(x,
+                                  target = target,
+                                  reduce_state = False,)
         states = [layer.state for layer in self.layers]
-        states = [x] + states + [target]
+        states = [x] + states + [-target.float()]
 
         for i in range(len(self.layers)):
             layer = self.layers[i]
@@ -342,6 +359,8 @@ class BDLNet(torch.nn.Module):
             y = states[i + 2]
 
             output = layer.train_step(x_i, y, lr = lr)
+
+        self.reduce_state()
         return output
 
 
