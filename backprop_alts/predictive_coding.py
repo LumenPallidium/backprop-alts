@@ -198,7 +198,8 @@ class BDLBlock(torch.nn.Module):
                  activation = torch.nn.Tanh(),
                  bias = False,
                  whiten = False,
-                 stateful = True):
+                 stateful = True,
+                 state_decay_rate = 0.9):
         """
         A bidirectional learning block. Has forward, backward, and lateral layers.
 
@@ -216,6 +217,8 @@ class BDLBlock(torch.nn.Module):
             Whether to use a bias term for each layer.
         whiten : bool
             Whether to use a whitening term (i.e. variance normalizing) for each layer.
+        stateful : bool
+            Whether to maintain a state for the block.
         """
         super().__init__()
 
@@ -263,8 +266,12 @@ class BDLBlock(torch.nn.Module):
         else:
             lateral_h = self.lateral_layer(lateral)
 
-        h = x_h - y_h - lateral_h
+        h = x_h + y_h + lateral_h
         output = self.activation(h)
+
+        if torch.isnan(output).any():
+            raise ValueError("NaN encountered in forward pass.")
+
         if self.stateful:
             self.state = output
 
@@ -272,7 +279,7 @@ class BDLBlock(torch.nn.Module):
             return output, h
         return output
     
-    def train_step(self, x, y, lateral = None, lr = 0.01):
+    def train_step(self, x, y, lateral = None, lr = 0.001):
         """
         Update weights based on a predictive coding energy functional that encourages
         lateral and backward predictions to match the forward predictions.
@@ -283,8 +290,8 @@ class BDLBlock(torch.nn.Module):
                                  lateral = lateral, return_all = True)
 
         dF = hebbian_pca(x, h, self.forward_layer.weight)
-        dB = -hebbian_pca(y, h, self.backward_layer.weight)
-        dL = -hebbian_pca(lateral, h, self.lateral_layer.weight)
+        dB = -torch.einsum("bi,bj->ji", y, h) / x.shape[0]
+        dL = -torch.einsum("bi,bj->ji", lateral, h) / x.shape[0]
 
         self.forward_layer.weight += lr * dF
         self.backward_layer.weight += lr * dB
@@ -298,7 +305,7 @@ class BDLNet(torch.nn.Module):
                  out_dim,
                  dim_mult = 1,
                  n_layers = 3,
-                 activation = torch.nn.Tanh(),
+                 activation = torch.nn.ReLU(),
                  bias = False):
         """
         A bidirectional learning network with forward, backward, and lateral layers that 
@@ -319,15 +326,14 @@ class BDLNet(torch.nn.Module):
                                         # require stateful for full net
                                         stateful = True))
             
-    def reduce_state(self):
+    def reduce_state(self, decay = 0.9):
         """
-        When state is a batch, convert to a vector.
+        When state is a batch, convert to a vector (and decay if necessary)
         """
         for layer in self.layers:
             if len(layer.state.shape) > 1:
-                layer.state = layer.state.mean(dim = 0)
-
-        
+                layer.state = layer.state.mean(dim = 0) * decay
+                
     def forward(self,
                 x,
                 target = None,
@@ -346,12 +352,12 @@ class BDLNet(torch.nn.Module):
 
         return out
     
-    def train_step(self, x, target, lr = 0.01):
+    def train_step(self, x, target, lr = 0.001):
         prediction = self.forward(x,
                                   target = target,
                                   reduce_state = False,)
         states = [layer.state for layer in self.layers]
-        states = [x] + states + [-target.float()]
+        states = [x] + states + [target.float()]
 
         for i in range(len(self.layers)):
             layer = self.layers[i]
