@@ -149,8 +149,8 @@ def mnist_test(net,
                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")):
     
     details = {"epoch_accs" : [],
-               "epoch_times" : [],
-               "epoch_samples" : [],}
+               "epoch_times" : [0],
+               "epoch_samples" : [0],}
     
     net.to(device)
 

@@ -1,5 +1,5 @@
 import torch
-from hebbian_learning import hebbian_pca
+from .hebbian_learning import hebbian_pca
 
 class BDPredictiveBlock(torch.nn.Module):
     def __init__(self,
@@ -122,14 +122,14 @@ class BDPredictiveCoder(torch.nn.Module):
         for i in range(n_layers - 1):
             dim_mult = self.dim_mult[i]
             self.layers.append(BDPredictiveBlock(in_dim, 
-                                                      int(in_dim * dim_mult),
-                                                      activation = activation,
-                                                      bias = bias))
+                                                 int(in_dim * dim_mult),
+                                                 activation = activation,
+                                                 bias = bias))
             in_dim = int(in_dim * dim_mult)
         self.layers.append(BDPredictiveBlock(in_dim, 
-                                                  out_dim,
-                                                  activation = activation,
-                                                  bias = bias))
+                                             out_dim,
+                                             activation = activation,
+                                             bias = bias))
         
 
         self.requires_grad_(False)
@@ -386,7 +386,10 @@ class PCNet(torch.nn.Module):
                  dim_mult = 1,
                  n_layers = 3,
                  activation = torch.nn.Tanh(),
-                 adaptive_relaxation = False
+                 adaptive_relaxation = False,
+                 ipc = True,
+                 lr = 0.01,
+                 equilibration_lr = 0.1,
                  ):
         super().__init__()
         self.in_dim = in_dim
@@ -395,6 +398,9 @@ class PCNet(torch.nn.Module):
         self.dim_mult = dim_mult
         self.n_layers = n_layers
         self.adaptive_relaxation = adaptive_relaxation
+        self.ipc = ipc
+        self.lr = lr
+        self.equilibration_lr = equilibration_lr
 
         self.layers = torch.nn.ModuleList()
         for i in range(n_layers - 1):
@@ -430,11 +436,77 @@ class PCNet(torch.nn.Module):
         else:
             raise NotImplementedError(f"Activation {activation} not implemented")
         return activation, activation_derivative
+    
+    def relax_activations(self,
+                          x,
+                          activations,
+                          backward_weights):
+            # this is syntactically different from paper
+            # i merged the forward + update loops to 1 for efficiency
+            errors = []
+            for j in range(self.n_layers):
+                layer = self.layers[j]
+                estimate = layer(self.activation(activations[j]))
+                error = activations[j + 1] - estimate
+                errors.append(error)
+                
+                if j == 0:
+                    continue
+                
+                back_weight = backward_weights[j]
+                grad = self.activation_derivative(activations[j])
+                dx = grad * (back_weight @ errors[j].T).T
+
+                if self.adaptive_relaxation:
+                    back_weight += self.lr * self.equilibration_lr * (activations[j].T @ errors[j]) / x.shape[0]
+                    backward_weights[j] = back_weight
+
+                activations[j] += self.equilibration_lr * (dx - errors[j - 1])
+
+            return error, errors
+
+    def _classic_pc_update(self,
+                           x,
+                           n_iters,
+                           activations,
+                           backward_weights):
+        # equilibration stage
+        for i in range(n_iters):
+            error, errors = self.relax_activations(x,
+                                                   activations,
+                                                   backward_weights)
+
+        # update weights after equilibration
+        for i in range(self.n_layers):
+            dW = self.lr * torch.einsum("bi,bj->ij", errors[i], activations[i]) / x.shape[0]
+            self.layers[i].weight += dW
+        
+        return error
+    
+    def _ipc_update(self,
+                    x,
+                    n_iters,
+                    activations,
+                    backward_weights):
+        """
+        Algorithm from here:
+        https://openreview.net/forum?id=RyUvzda8GH
+        """
+        # equilibration stage and weight update are combined
+        for i in range(n_iters):
+            error, errors = self.relax_activations(x,
+                                                   activations,
+                                                   backward_weights)
+
+            # notice the difference from above : this is indented
+            for l in range(self.n_layers):
+                dW = self.lr * torch.einsum("bi,bj->ij", errors[l], activations[l]) / x.shape[0]
+                self.layers[l].weight += dW
+        
+        return error
         
     def train_step(self, x, y, 
-                   n_iters = 128, 
-                   lr = 0.01,
-                   equilibration_lr = 0.1,
+                   n_iters = 128,
                    noise_scale = 0.1):
         """
         Predictive coding training step, see Algorithm 1 in the paper:
@@ -452,33 +524,16 @@ class PCNet(torch.nn.Module):
 
         backward_weights = [layer.weight.T for layer in self.layers]
 
-        # equilibration stage
-        for i in range(n_iters):
-            # this is different from paper, i merged the forward + update loops to 1 for efficiency
-            errors = []
-            for j in range(self.n_layers):
-                layer = self.layers[j]
-                estimate = layer(self.activation(activations[j]))
-                error = activations[j + 1] - estimate
-                errors.append(error)
-                
-                if j == 0:
-                    continue
-                
-                back_weight = backward_weights[j]
-                grad = self.activation_derivative(activations[j])
-                dx = grad * (back_weight @ errors[j].T).T
-
-                if self.adaptive_relaxation:
-                    back_weight += lr * equilibration_lr * (activations[j].T @ errors[j]) / x.shape[0]
-                    backward_weights[j] = back_weight
-
-                activations[j] += equilibration_lr * (dx - errors[j - 1])
-
-        # update weights after equilibration
-        for i in range(self.n_layers):
-            dW = lr * torch.einsum("bi,bj->ij", errors[i], activations[i]) / x.shape[0]
-            self.layers[i].weight += dW
+        if self.ipc:
+            error = self._ipc_update(x_clamp,
+                                     n_iters,
+                                     activations,
+                                     backward_weights)
+        else:
+            error= self._classic_pc_update(x_clamp,
+                                           n_iters,
+                                           activations,
+                                           backward_weights)
 
         return error # final error
 
@@ -505,20 +560,25 @@ if __name__ == "__main__":
     whiten = True
     n_layers = 3
     activation = torch.nn.Tanh()
-    adaptive_relax = True
+    adaptive_relax = False
+    ipc = False
+    lr = 0.001
+
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # net = PCNet(in_dim,
-    #             n_labels,
-    #             dim_multiplier,
-    #             activation = activation,
-    #             n_layers = n_layers,
-    #             adaptive_relaxation = adaptive_relax).to(device)
-    net = BDLNet(in_dim,
-                  n_labels,
-                  dim_multiplier,
-                  n_layers = n_layers).to(device)
+    net = PCNet(in_dim,
+                n_labels,
+                dim_multiplier,
+                activation = activation,
+                n_layers = n_layers,
+                adaptive_relaxation = adaptive_relax,
+                ipc = ipc,
+                lr = lr).to(device)
+    # net = BDLNet(in_dim,
+    #               n_labels,
+    #               dim_multiplier,
+    #               n_layers = n_layers).to(device)
     accs, errors, y, details = mnist_test(net,
                                 device = device)
 

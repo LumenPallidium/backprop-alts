@@ -1,6 +1,6 @@
 import torch
-from hebbian_learning import hebbian_wta, hebbian_pca
-from utils import get_graph_hierarcy
+from .hebbian_learning import hebbian_wta, hebbian_pca
+from .utils import get_graph_hierarcy
 
 def generate_directed_ER(dim,
                          link_prob = 0.5,
@@ -179,8 +179,8 @@ class Reservoir(torch.nn.Module):
         self.maintain_sparsity = maintain_sparsity
         self.sparsity_eps = sparsity_eps
 
-        self.adj = torch.nn.Parameter(self._init_adjacency(adj_type, spectral_radius))
-        self.adj.requires_grad = False
+        self.adj = torch.nn.Parameter(self._init_adjacency(adj_type, spectral_radius),
+                                      requires_grad = False)
 
         # scale-free learning rate
         if self.multi_ts:
@@ -199,7 +199,10 @@ class Reservoir(torch.nn.Module):
         else:
             self.lr = lr
             self.inertia = inertia
-            self.inputs = torch.arange(in_dim)
+            if in_dim < dim:
+                self.inputs = torch.arange(in_dim)
+            else:
+                raise ValueError("Input dimensionality must be less than reservoir dimensionality")
 
         # TODO : read literature on initialization of state
         if state is None:
@@ -239,7 +242,7 @@ class Reservoir(torch.nn.Module):
             raise ValueError("Unknown adjacency type")
         return adj
 
-    def forward(self, x, n_steps = 1, readout = True):
+    def forward(self, x, n_steps = 4, readout = True):
         """
         Parameters
         ----------
@@ -254,17 +257,18 @@ class Reservoir(torch.nn.Module):
             If readout is defined, return the readout of the reservoir state
             otherwise, return the state after n_steps
         """
-        temp_state = self.state.clone().detach().repeat(x.shape[0], 1)
-        for i in range(n_steps):
-            new_state = temp_state.clone()
-            # set the input neurons
-            new_state[:, self.inputs] = x
-            new_state = self.activation(torch.nn.functional.linear(new_state, self.adj) + \
-                                        self.bias)
-            temp_state.data.mul_(self.inertia).add_(new_state * (1 - self.inertia))
+        with torch.no_grad():
+            temp_state = self.state.clone().detach().repeat(x.shape[0], 1)
+            for i in range(n_steps):
+                new_state = temp_state.clone()
+                # set the input neurons
+                new_state[:, self.inputs] = x
+                new_state = self.activation(torch.nn.functional.linear(new_state, self.adj) + \
+                                            self.bias)
+                temp_state.data.mul_(self.inertia).add_(new_state * (1 - self.inertia))
 
-        # update state by averaging over the batch
-        self.state.data = temp_state.data.clone().detach().mean(dim = 0)
+            # update state by averaging over the batch
+            self.state.data = temp_state.data.clone().detach().mean(dim = 0)
 
         if readout and (self.readout is not None):
             if self.output_neurons:
@@ -276,21 +280,22 @@ class Reservoir(torch.nn.Module):
         return output
 
     def hebbian_update(self, x, y, normalize = False, self_avoid = False, var_scale = 1):
-        if self_avoid:
-            dA = torch.einsum("bi,bj->ij", x, y) - torch.einsum("bi,bj->ij", x, x)
-            dA /= x.shape[0]
-        else:
-            dA = hebbian_pca(x, y, self.adj)
+        with torch.no_grad():
+            if self_avoid:
+                dA = torch.einsum("bi,bj->ij", x, y) - torch.einsum("bi,bj->ij", x, x)
+                dA /= x.shape[0]
+            else:
+                dA = hebbian_pca(x, y, self.adj)
 
-        # normalize values such that sum is 0 (ie mass conservation)
-        if normalize:
-            dA = dA - dA.mean(dim = 0, keepdim = True)
-            dA = dA * var_scale / dA.var(keepdim = True)
+            # normalize values such that sum is 0 (ie mass conservation)
+            if normalize:
+                dA = dA - dA.mean(dim = 0, keepdim = True)
+                dA = dA * var_scale / dA.var(keepdim = True)
 
-        self.adj.data += self.lr * dA
-        self.bias.data -= (self.lr * x).mean(dim = 0)
-        if self.maintain_sparsity:
-            self.adj.data[torch.abs(self.adj.data) < self.sparsity_eps] = 0
+            self.adj.data += self.lr * dA
+            self.bias.data -= (self.lr * x).mean(dim = 0)
+            if self.maintain_sparsity:
+                self.adj.data[torch.abs(self.adj.data) < self.sparsity_eps] = 0
         
     def train_step(self, x, labels = None, n_steps = 20):
         start_state = self.state.clone().detach().repeat(x.shape[0], 1)

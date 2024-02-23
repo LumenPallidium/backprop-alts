@@ -150,8 +150,8 @@ def mnist_test_ff(in_dim,
                 ).to(device)
     
     details = {"epoch_accs" : [],
-               "epoch_times" : [],
-               "epoch_samples" : [],}
+               "epoch_times" : [0],
+               "epoch_samples" : [0],}
 
     with torch.no_grad():
         mnist, mnist_val, accs, errors = _prepare_for_epochs()
@@ -189,6 +189,20 @@ def mnist_test_ff(in_dim,
 
             details["epoch_times"].append(time)
             details["epoch_samples"].append(samples)
+
+        # one last validation run
+        epoch_val_accs = []
+        for i, (x, y) in tqdm(enumerate(val_loader)):
+            x = x.reshape([x.shape[0], -1]).to(device)
+            # forward-forward does not work well with continuous images
+            if easy:
+                x = (x > 0.5).float()
+
+            y = y.to(device)
+            acc = net.validate(x, y)
+            epoch_val_accs.append(acc)
+        accs.extend(epoch_val_accs)
+        details["epoch_accs"].append(np.mean(epoch_val_accs))
 
     return accs, errors, y, details
 

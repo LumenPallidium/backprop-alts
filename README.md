@@ -62,10 +62,11 @@ Implementing [convolutional Hebbian learning](https://openportal.isti.cnr.it/doc
 
 Predictive coding is a neuroscience-inspired learning method that avoids some of the implausibility of backpropagation without sacrificing global error signals. The essential step is that only errors from predictions are passed "upwards" in the neural network. The error is calulated either via comparison with a backward prediction (in the bidrectional case) or via a energy-based relaxation phase that follows an energy gradient that decreases the errors then updates the weights to make that state more likely in the future (in feedforward case, see the linked paper for details). Note that predictive coding often has many Hebbian components, but it's listed seperately because there are major differences and non-Hebbian aspects to the learning.
 
-Two variants are implemented here:
+Three variants are implemented here (with some subvariants):
 
 * Bidirectional predictive coding (largely based on [this book](https://mitpress.mit.edu/9780262545617/gradient-expectations/))
 * [Feedforward predictive coding](https://pubmed.ncbi.nlm.nih.gov/28333583/)
+* [Incremental PC (iPC)](https://openreview.net/forum?id=RyUvzda8GH)
 
 ## Generalized Principal Subspace Projection (GSSP)
 This is based on a [recent paper](https://arxiv.org/abs/2302.10051) from Flatiron Institute. They derive online, non-Hebbian learning rules based on the idea of pyramidal neurons in the cerebral cortex being multicompartmental: they have distinct (apical, proximal) dendrites that integrate information from discrete neural populations. Therefore, this rule is based on learning involving integrating two seperate multidimensional signals.

@@ -88,15 +88,18 @@ def mnist_comparisons(n_epochs,
                       n_layers = 3,
                       in_dim = 784,
                       out_dim = 10,
-                      mult = 0.75):
+                      mults = 0.75):
     
     if isinstance(n_layers, (int, float)):
         n_layers = [n_layers]
+    if isinstance(mults, (int, float)):
+        mults = [mults]
+    assert len(n_layers) == len(mults), "n_layers and mults must be the same length"
     
     depth_scores = {}
 
     # TODO: i could probably do this in a loop or something
-    for layer_count in n_layers:
+    for mult, layer_count in zip(mults, n_layers):
         scores = {}
 
         # test the baseline
@@ -106,25 +109,53 @@ def mnist_comparisons(n_epochs,
                                    n_epochs = n_epochs)
         scores["Backprop"] = base
 
+        #TODO : fix reservoir, need better input functionality for when in_dim > dim
         # test the reservoir
-        res_dim = _calc_fair_reservoir_size(layer_count, mult, in_dim, out_dim)
-        _, _, _, res = mnist_test(Reservoir(in_dim, res_dim, 
-                                            # note the readout is allowed backprop
-                                            readout= LinearReadout(res_dim, out_dim,
-                                                                   optimizer=torch.optim.SGD,)),
-                                  n_epochs = n_epochs)
-        scores["Reservoir"] = res
+        # res_dim = _calc_fair_reservoir_size(layer_count, mult, in_dim, out_dim)
+        # _, _, _, res = mnist_test(Reservoir(in_dim, res_dim, 
+        #                                     adaptive = False,
+        #                                     multi_ts = False,
+        #                                     maintain_sparsity = False,
+        #                                     # note the readout is allowed backprop
+        #                                     readout= LinearReadout(res_dim, out_dim,
+        #                                                            optimizer=torch.optim.SGD,)),
+        #                           n_epochs = n_epochs)
+        # scores["Reservoir"] = res
 
         # test ff
-        _, _, _, ff = mnist_test_ff(in_dim, layer_count, n_epochs, dim_mult = mult)
+        _, _, _, ff = mnist_test_ff(in_dim,
+                                    layer_count,
+                                    n_epochs,
+                                    dim_mult = mult)
         scores["Forward-forward"] = ff
 
         # test predictive coding
         _, _, _, pc = mnist_test(PCNet(in_dim, out_dim,
                                        dim_mult = mult,
-                                       n_layers = layer_count,),
+                                       n_layers = layer_count,
+                                       ipc = False),
                                  n_epochs = n_epochs)
         scores["Predictive Coding"] = pc
+
+        # test adaptive relax predictive coding
+        _, _, _, apc = mnist_test(PCNet(in_dim, out_dim,
+                                        dim_mult = mult,
+                                        n_layers = layer_count,
+                                        ipc = False,
+                                        adaptive_relaxation = True
+                                        ),
+                                  n_epochs = n_epochs)
+        scores["Predictive Coding (Adap)"] = apc
+
+        # test incremental predictive coding
+        _, _, _, ipc = mnist_test(PCNet(in_dim, out_dim,
+                                        dim_mult = mult,
+                                        n_layers = layer_count,
+                                        # slight variation needs lower LR, 0.1x
+                                        lr = 0.001
+                                        ),
+                                  n_epochs = n_epochs)
+        scores["Predictive Coding (Inc)"] = ipc
 
         # test bidirectional predictive coding
         _, _, _, bdp = mnist_test(BDPredictiveCoder(in_dim, out_dim,
@@ -159,7 +190,6 @@ def pretty_plot(x_data,
         y_smooth = spl(x_smooth)
         ax.plot(x_smooth, y_smooth, color = colors[i], alpha = 0.6)
     
-
     ax.legend(loc="lower right",)
     ax.set_facecolor("white")
     ax.grid(alpha = 0.1)
@@ -173,11 +203,45 @@ def pretty_plot(x_data,
     plt.savefig(f"plots/{plot_title}.png")
     plt.close()
 
-if __name__ == "__main__":
-    all_scores = mnist_comparisons(5,
-                                   n_layers = [3, 5, 7, 10])
+#TODO : this is non-ideal with deep networks
+#TODO : we want final_layer > out_dim
+def get_mults(n_layers, in_dim, out_dim, total_neurons):
+    """
+    Get the multipliers for each layer to hit the total number of neurons.
+    """
+    if isinstance(n_layers, (int, float)):
+        n_layers = [n_layers]
+    mults = []
+    ratio = (total_neurons - out_dim) / in_dim
+    # note ratio = (mult + mult**2 + mult**3 + ... + mult**n_layers) = total_neurons / in_dim
+    for n_layers_i in n_layers:
+        p = [1] * (n_layers_i - 1) + [-ratio]
+        mults_i = np.roots(p)
+        # get real root less than 2
+        mults_i = [mult.real for mult in mults_i if 0 < mult.real < 2]
+        if len(mults_i) == 0:
+            raise ValueError(f"Cannot hit {total_neurons} neurons with {n_layers_i} layers")
+        mults.append(min(mults_i))
+        # check that neuron number at final layer is greater than out_dim
+        final_layer = int(mults[-1] ** (n_layers_i - 1) * in_dim)
+        if final_layer < out_dim:
+            raise ValueError(f"Cannot hit {total_neurons} neurons with {n_layers_i} layers")
+    return mults
 
-    for n_layers, scores in all_scores.items():
+if __name__ == "__main__":
+    n_epochs = 5
+    n_layers = [3, 5, 7]
+    in_dim = 784
+    out_dim = 10
+    # try to hit this number of neurons for comparability with different layer numbers
+    total_neurons = 1500
+    mults = get_mults(n_layers, in_dim, out_dim, total_neurons)
+
+    all_scores = mnist_comparisons(n_epochs,
+                                   mults = mults,
+                                   n_layers = n_layers)
+
+    for n_layers_i, scores in all_scores.items():
         # TODO : do this in pandas or something
         labels = list(scores.keys())
         accs = [list(scores[label]["epoch_accs"]) for label in labels]
@@ -186,7 +250,7 @@ if __name__ == "__main__":
         samples = [list(scores[label]["epoch_samples"]) for label in labels]
         samples = np.cumsum(samples, axis = 1)
 
-        pretty_plot(times, accs, labels, f"Clock Time ({n_layers} layers)", "Time (s)", "Validation Accuracy")
-        pretty_plot(samples, accs, labels, f"Sample Efficiency({n_layers} layers)", "Samples", "Validation Accuracy")
+        pretty_plot(times, accs, labels, f"Clock Time ({n_layers_i} layers)", "Time (s)", "Validation Accuracy")
+        pretty_plot(samples, accs, labels, f"Sample Efficiency({n_layers_i} layers)", "Samples", "Validation Accuracy")
         
 
