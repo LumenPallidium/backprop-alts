@@ -52,6 +52,8 @@ class FFNet(torch.nn.Module):
         super().__init__()
         self.in_dim = in_dim
         self.n_layers = n_layers
+        if isinstance(dim_mult, (int, float)):
+            dim_mult = [dim_mult] * (n_layers - 1)
         self.dim_mult = dim_mult
         if out_dim is None:
             out_dim = in_dim
@@ -61,17 +63,29 @@ class FFNet(torch.nn.Module):
         self.theta = theta
         self.n_labels = n_labels
 
-        dim = int(in_dim * dim_mult)
+        dim = int(in_dim * self.dim_mult[0])
         self.layers = torch.nn.ModuleList()
-        self.layers.append(FFBlock(in_dim + n_labels, dim, activation = activation, theta = theta, bias = bias))
-        in_dim = dim
+        self.layers.append(FFBlock(in_dim + n_labels,
+                                   dim,
+                                   activation = activation,
+                                   theta = theta,
+                                   bias = bias))
+        prev_dim = dim
 
         for i in range(n_layers - 2):
-            dim = int(dim * dim_mult)
-            self.layers.append(FFBlock(in_dim, dim, activation = activation, theta = theta, bias = bias))
-            in_dim = dim
+            dim = int(in_dim * dim_mult[i + 1])
+            self.layers.append(FFBlock(prev_dim,
+                                       dim,
+                                       activation = activation,
+                                       theta = theta,
+                                       bias = bias))
+            prev_dim = dim
         
-        self.layers.append(FFBlock(dim, out_dim, activation = activation, theta = theta, bias = bias))
+        self.layers.append(FFBlock(prev_dim,
+                                   out_dim,
+                                   activation = activation,
+                                   theta = theta,
+                                   bias = bias))
 
     def forward(self, x, return_energy = False):
         if return_energy:

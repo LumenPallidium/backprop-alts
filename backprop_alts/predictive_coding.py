@@ -119,14 +119,15 @@ class BDPredictiveCoder(torch.nn.Module):
         self.n_layers = n_layers
 
         self.layers = torch.nn.ModuleList()
+        prev_dim = in_dim
         for i in range(n_layers - 1):
             dim_mult = self.dim_mult[i]
-            self.layers.append(BDPredictiveBlock(in_dim, 
+            self.layers.append(BDPredictiveBlock(prev_dim, 
                                                  int(in_dim * dim_mult),
                                                  activation = activation,
                                                  bias = bias))
-            in_dim = int(in_dim * dim_mult)
-        self.layers.append(BDPredictiveBlock(in_dim, 
+            prev_dim = int(in_dim * dim_mult)
+        self.layers.append(BDPredictiveBlock(prev_dim, 
                                              out_dim,
                                              activation = activation,
                                              bias = bias))
@@ -315,7 +316,9 @@ class BDLNet(torch.nn.Module):
         super().__init__()
         self.layers = torch.nn.ModuleList()
 
-        dims = [in_dim] + [int(in_dim * (dim_mult ** i)) for i in range(n_layers - 1)] + [out_dim]
+        if isinstance(dim_mult, (int, float)):
+            dim_mult = [dim_mult] * (n_layers - 1)
+        dims = [in_dim] + [int(in_dim * dim_mult[i]) for i in range(n_layers - 1)] + [out_dim]
 
         for i in range(n_layers - 1):
             self.layers.append(BDLBlock(dims[i],
@@ -403,14 +406,15 @@ class PCNet(torch.nn.Module):
         self.equilibration_lr = equilibration_lr
 
         self.layers = torch.nn.ModuleList()
+        prev_dim = in_dim
         for i in range(n_layers - 1):
             dim_mult = self.dim_mult[i]
-            self.layers.append(torch.nn.Linear(in_dim,
+            self.layers.append(torch.nn.Linear(prev_dim,
                                                int(in_dim * dim_mult),
                                                bias = False))
-            in_dim = int(in_dim * dim_mult)
+            prev_dim = int(in_dim * dim_mult)
 
-        self.layers.append(torch.nn.Linear(in_dim, out_dim, bias = False))
+        self.layers.append(torch.nn.Linear(prev_dim, out_dim, bias = False))
         
         self.activation, self.activation_derivative = self._init_activation(activation)
 
@@ -563,7 +567,6 @@ if __name__ == "__main__":
     adaptive_relax = False
     ipc = False
     lr = 0.001
-
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

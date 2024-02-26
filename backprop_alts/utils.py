@@ -16,33 +16,34 @@ def losses_to_running_loss(losses, alpha = 0.95):
         running_losses.append(running_loss)
     return running_losses
 
+@torch.no_grad()
 def conjucate_gradient(A, b, x, n_iters = 10):
     """
     Simple conjucate gradient solver for 
     min_x ||Ax - b||_2
     """
-    with torch.no_grad():
-        r = b - A @ x
+    r = b - A @ x
+    g = A.T @ r
+    for i in range(n_iters):
+        if torch.norm(g) < 1e-8:
+            break
+        if i == 0:
+            p = g.clone()
+        else:
+            beta = (torch.linalg.vector_norm(g) / torch.linalg.vector_norm(g_old))
+            p = g + (beta ** 2) * p
+
+        step = (A @ p)
+        alpha = (torch.linalg.vector_norm(g) / torch.linalg.vector_norm(step)) ** 2
+
+        x = x + alpha * p
+        r = r - alpha * (A @ p)
+        
+        g_old = g.clone()
         g = A.T @ r
-        for i in range(n_iters):
-            if torch.norm(g) < 1e-8:
-                break
-            if i == 0:
-                p = g.clone()
-            else:
-                beta = (torch.linalg.vector_norm(g) / torch.linalg.vector_norm(g_old))
-                p = g + (beta ** 2) * p
-
-            step = (A @ p)
-            alpha = (torch.linalg.vector_norm(g) / torch.linalg.vector_norm(step)) ** 2
-
-            x = x + alpha * p
-            r = r - alpha * (A @ p)
-            
-            g_old = g.clone()
-            g = A.T @ r
     return x
 
+@torch.no_grad()
 def get_graph_hierarcy(adjacency,
                        n_iters = 10):
     """
@@ -84,6 +85,7 @@ def get_graph_hierarcy(adjacency,
     avg_hierarchy = (forward_levels - backward_levels) / 2
     return avg_hierarchy, forward_levels, backward_levels
 
+@torch.no_grad()
 def hierarchical_difference(hierarchy_vector):
     """
     Gets the hierarchical difference matrix from the paper.
@@ -96,6 +98,7 @@ def hierarchical_difference(hierarchy_vector):
     diff = hierarchy_vector - vector_copy
     return diff
 
+@torch.no_grad()
 def democracy_coefficents(adjacency):
     """
     Democracy coefficients from the paper.
@@ -112,6 +115,53 @@ def democracy_coefficents(adjacency):
     mean_bhd = (adjacency * backward_diff).sum() / adjacency.sum()
 
     return 1 - mean_fhd, 1 - mean_bhd
+
+@torch.no_grad()
+def laplacian_renormalization(t, adjacency, use_out_degree = True):
+    """
+    Implementation of Laplacian renormalization from this paper:
+    https://www.nature.com/articles/s41567-022-01866-8
+
+    Parameters
+    ----------
+    t : float
+        Time parameter.
+    adjacency : torch.Tensor
+        Adjacency matrix of graph.
+    use_out_degree : bool
+        Whether to use out-degree in the Laplacian (false uses in-degree).
+    """
+    axis = int(use_out_degree)
+    L = torch.diag(adjacency.sum(dim = axis)) - adjacency
+    e, v = torch.linalg.eig(L)
+
+    # note since graph laplacian is positive semi-definite, we can
+    # use the real part of the eigenvalues wlog
+    e = e.real
+
+    # get the propagator/density matrix
+    propagator = torch.diag(torch.exp(-t * e))
+    trace = propagator.sum()
+    propagator = propagator.to(torch.complex64)
+    propagator = v @ propagator @ v.H
+    propagator = propagator.real / trace
+
+    lambda_star = 1 / t
+    mask = (e > lambda_star)
+    n = mask.sum().item()
+    N = len(e)
+
+    if n < 1:
+        raise ValueError(f"Laplacian renormalization failed with t = {t}")
+
+    e_subset, v_subset = e[mask], v[:, mask]
+    reduced_laplacian = torch.einsum("ij,j,jk->ik", v_subset, e_subset, v_subset.H).real
+
+    # trickiest step, go through the propagator and aggregate nodes
+    clusters = []
+    while len(clusters) < n:
+        pass #TODO
+
 
 def _prepare_for_epochs():
     transform = transforms.Compose([transforms.ToTensor(),
@@ -532,6 +582,14 @@ class ActorPerciever(torch.nn.Module):
 #TODO : synthetic gradient
 #TODO : rtrl would be cool
 if __name__ == "__main__":
+
+    adjacency = torch.Tensor([[1, 2, 1],
+                              [3, 1, 1],
+                              [0, -1, 1],])
+    adj2 = torch.randint(0, 2, (10, 10)).float()
+    laplacian_renormalization(0.3, adj2)
+
+
     from itertools import chain
     n_steps = 100000
     bptt_steps = 100
