@@ -126,20 +126,23 @@ def union(parent, i, j):
     """Union operation in union-find data structure."""
     parent[find(parent, i)] = find(parent, j)
 
-def aggregate_vectors(indices, N, normalize = True):
+def aggregate_vectors(indices, n, N, normalize = True):
+    target = N - n
     parent = torch.arange(N)
 
     # merge nodes
     for i, j in indices:
         union(parent, i, j)
-
-    # helps avoid duplicate nodes
-    representative_nodes = torch.unique(parent)
+        representative_nodes = torch.unique(parent)
+        # check if representative nodes is less than target
+        if len(representative_nodes) <= target:
+            break
 
     aggregation_vectors = []
     for node in representative_nodes:
         vector = torch.zeros(N, dtype=torch.int)
         vector[parent == node] = 1
+        #TODO : paper doesn't specify how it should be normalized eg in-degree
         if normalize:
             vector = vector / vector.sum()
         aggregation_vectors.append(vector)
@@ -188,25 +191,31 @@ def laplacian_renormalization(t, adjacency, use_out_degree = True):
     reduced_laplacian = torch.einsum("ij,j,jk->ik", v_subset, e_subset, v_subset.H).real
 
     # trickiest step, go through the propagator and aggregate nodes
-    k = propagator.numel()
     # make upper triangular to avoid duplication and self-aggregation
     propagator_offd = torch.triu(propagator, diagonal = 1)
 
+    k = propagator.numel() // 2
     indices = propagator_offd.view(-1).topk(k).indices
 
     # convert to row, col indices
     row_indices = indices // propagator.size(1)
     col_indices = indices % propagator.size(1)
 
-    # TODO : this returns more than N -n vectors, need to fix
-    superposition_vectors = aggregate_vectors(torch.stack((row_indices[:(n+1)], 
-                                                           col_indices[:(n+1)]),
+    # TODO : this returns more than N - n vectors, need to fix
+    superposition_vectors = aggregate_vectors(torch.stack((row_indices, 
+                                                           col_indices),
                                                            dim=1), 
-                                              N)
+                                               n, N)
+
     
-    #TODO : add the reduction of the laplacian using the superposition vectors
+    # add the reduction of the laplacian using the superposition vectors
+    projection_matrix = torch.stack(superposition_vectors, dim=0).float()
+    reduced_adj = - (projection_matrix @ reduced_laplacian @ projection_matrix.T)
+
+    # required in paper
+    reduced_adj = reduced_adj - torch.diag(torch.diag(reduced_adj))
     
-    return reduced_laplacian
+    return reduced_adj
 
 def _prepare_for_epochs():
     transform = transforms.Compose([transforms.ToTensor(),
