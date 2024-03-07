@@ -116,6 +116,36 @@ def democracy_coefficents(adjacency):
 
     return 1 - mean_fhd, 1 - mean_bhd
 
+def find(parent, i):
+    """Find operation in union-find data structure."""
+    if parent[i] != i:
+        parent[i] = find(parent, parent[i])
+    return parent[i]
+
+def union(parent, i, j):
+    """Union operation in union-find data structure."""
+    parent[find(parent, i)] = find(parent, j)
+
+def aggregate_vectors(indices, N, normalize = True):
+    parent = torch.arange(N)
+
+    # merge nodes
+    for i, j in indices:
+        union(parent, i, j)
+
+    # helps avoid duplicate nodes
+    representative_nodes = torch.unique(parent)
+
+    aggregation_vectors = []
+    for node in representative_nodes:
+        vector = torch.zeros(N, dtype=torch.int)
+        vector[parent == node] = 1
+        if normalize:
+            vector = vector / vector.sum()
+        aggregation_vectors.append(vector)
+
+    return aggregation_vectors
+
 @torch.no_grad()
 def laplacian_renormalization(t, adjacency, use_out_degree = True):
     """
@@ -158,10 +188,25 @@ def laplacian_renormalization(t, adjacency, use_out_degree = True):
     reduced_laplacian = torch.einsum("ij,j,jk->ik", v_subset, e_subset, v_subset.H).real
 
     # trickiest step, go through the propagator and aggregate nodes
-    clusters = []
-    while len(clusters) < n:
-        pass #TODO
+    k = propagator.numel()
+    # make upper triangular to avoid duplication and self-aggregation
+    propagator_offd = torch.triu(propagator, diagonal = 1)
 
+    indices = propagator_offd.view(-1).topk(k).indices
+
+    # convert to row, col indices
+    row_indices = indices // propagator.size(1)
+    col_indices = indices % propagator.size(1)
+
+    # TODO : this returns more than N -n vectors, need to fix
+    superposition_vectors = aggregate_vectors(torch.stack((row_indices[:(n+1)], 
+                                                           col_indices[:(n+1)]),
+                                                           dim=1), 
+                                              N)
+    
+    #TODO : add the reduction of the laplacian using the superposition vectors
+    
+    return reduced_laplacian
 
 def _prepare_for_epochs():
     transform = transforms.Compose([transforms.ToTensor(),
