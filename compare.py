@@ -6,7 +6,7 @@ from matplotlib.ticker import PercentFormatter
 from scipy.interpolate import make_interp_spline
 from backprop_alts.reservoir import Reservoir, LinearReadout
 from backprop_alts.predictive_coding import BDPredictiveCoder, PCNet
-from backprop_alts.forwardforward import mnist_test_ff
+from backprop_alts.forwardforward import mnist_test_ff, PEPITA
 from backprop_alts.utils import mnist_test
 
 #TODO : plot layer details (like generalized eigenvalues) for each method
@@ -73,8 +73,10 @@ def _calc_fair_reservoir_size(n_layers, dim_mult, in_dim, out_dim):
     """
     n_params = 0
     dim = in_dim
+    if isinstance(dim_mult, (int, float)):
+        dim_mult = [dim_mult] * (n_layers - 1)
     for i in range(n_layers - 1):
-        new_dim = int(dim * dim_mult)
+        new_dim = int(dim * dim_mult[i])
         n_params += dim * new_dim
         dim = new_dim
     n_params += dim * out_dim
@@ -111,16 +113,16 @@ def mnist_comparisons(n_epochs,
 
         #TODO : fix reservoir, need better input functionality for when in_dim > dim
         # test the reservoir
-        # res_dim = _calc_fair_reservoir_size(layer_count, mult, in_dim, out_dim)
-        # _, _, _, res = mnist_test(Reservoir(in_dim, res_dim, 
-        #                                     adaptive = False,
-        #                                     multi_ts = False,
-        #                                     maintain_sparsity = False,
-        #                                     # note the readout is allowed backprop
-        #                                     readout= LinearReadout(res_dim, out_dim,
-        #                                                            optimizer=torch.optim.SGD,)),
-        #                           n_epochs = n_epochs)
-        # scores["Reservoir"] = res
+        res_dim = _calc_fair_reservoir_size(layer_count, mult, in_dim, out_dim)
+        _, _, _, res = mnist_test(Reservoir(in_dim, res_dim, 
+                                            adaptive = False,
+                                            multi_ts = False,
+                                            maintain_sparsity = False,
+                                            # note the readout is allowed backprop
+                                            readout= LinearReadout(res_dim, out_dim,
+                                                                   optimizer=torch.optim.SGD,)),
+                                  n_epochs = n_epochs)
+        scores["Reservoir"] = res
 
         # test ff
         _, _, _, ff = mnist_test_ff(in_dim,
@@ -128,6 +130,14 @@ def mnist_comparisons(n_epochs,
                                     n_epochs,
                                     dim_mult = mult)
         scores["Forward-forward"] = ff
+
+        # test pepita
+        _, _, _, pep = mnist_test(PEPITA(in_dim,
+                                         out_dim = out_dim,
+                                         dim_mult = mult,
+                                         n_layers = layer_count),
+                                    n_epochs = n_epochs)
+        scores["PEPITA"] = pep
 
         # test predictive coding
         _, _, _, pc = mnist_test(PCNet(in_dim, out_dim,
@@ -186,7 +196,7 @@ def pretty_plot(x_data,
 
         # fitting curve
         spl = make_interp_spline(x_data[i], y_data[i],
-                                 k = 3)
+                                 k = 2)
         y_smooth = spl(x_smooth)
         ax.plot(x_smooth, y_smooth, color = colors[i], alpha = 0.6)
     
@@ -226,11 +236,11 @@ def get_mults(n_layers,
 
 if __name__ == "__main__":
     n_epochs = 5
-    n_layers = [12]
+    n_layers = [4]
     in_dim = 784
     out_dim = 10
     # try to hit this number of neurons for comparability with different layer numbers
-    total_neurons = 1000
+    total_neurons = 2000
     mults = get_mults(n_layers, in_dim, out_dim, total_neurons)
 
     all_scores = mnist_comparisons(n_epochs,

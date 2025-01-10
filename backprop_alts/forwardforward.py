@@ -269,6 +269,73 @@ def _noncollaborative_ff_train(net, data, device, n_layers, lr = 0.1, easy = Fal
             net.train_step(x, y, layer_i, lr = lr)
     return time() - time_start, i * batch_size
 
+class PEPITA(torch.nn.Module):
+    """
+    The "Present the Error to Perturb the Input To modulate Activity" model from
+    https://arxiv.org/pdf/2201.11665
+    A first forward pass gets the error, then the error is sent backwards with a fixed
+    random projection, which then is used with Hebbian learning to update the whole network,
+    
+    """
+    def __init__(self,
+                 in_dim,
+                 n_layers = 3,
+                 dim_mult = 1,
+                 out_dim = None,
+                 activation = torch.nn.ReLU()):
+        super().__init__()
+        self.in_dim = in_dim
+        self.n_layers = n_layers
+        if isinstance(dim_mult, (int, float)):
+            dim_mult = [dim_mult] * (n_layers - 1)
+        self.dim_mult = dim_mult
+        if out_dim is None:
+            out_dim = in_dim
+        self.out_dim = out_dim
+
+        prev_dim = in_dim
+        self.layers = torch.nn.ModuleList()
+        for i in range(n_layers - 1):
+            dim = int(in_dim * dim_mult[i])
+            self.layers.append(torch.nn.Sequential(torch.nn.Linear(prev_dim, dim),
+                                                   activation))
+            prev_dim = dim
+
+        self.layers.append(torch.nn.Linear(prev_dim, out_dim))
+
+        self.back_layer = torch.nn.Linear(out_dim, in_dim)
+
+    def forward(self, x, return_intermediate = False):
+        intermediate = []
+        for layer in self.layers:
+            x = layer(x)
+            if return_intermediate:
+                intermediate.append(x)
+        if return_intermediate:
+            return x, intermediate
+        return x
+    
+    def train_step(self, x, y, lr = 0.1):
+        out, activations = self.forward(x, return_intermediate = True)
+        error = out - y
+        prev_error = self.back_layer(error)
+        prev_error = x + prev_error
+        for i, layer in enumerate(self.layers):
+            next_error = layer(prev_error)
+            if i != len(self.layers) - 1:
+                dW = torch.einsum("bi,bj->bij",
+                                  activations[i] - next_error,
+                                  prev_error).mean(dim = 0)
+                layer[0].weight.data -= lr * dW 
+            else:
+                dW = torch.einsum("bi,bj->bij",
+                                  error,
+                                  prev_error).mean(dim = 0)
+                layer.weight.data -= lr * dW
+            prev_error = next_error
+        return [(error**2).mean().item()]
+        
+
 #TODO : should goodness be a scalar?
 if __name__ == "__main__":
     from tqdm import tqdm

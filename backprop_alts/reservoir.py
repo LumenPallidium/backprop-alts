@@ -262,6 +262,7 @@ class Reservoir(torch.nn.Module):
             for i in range(n_steps):
                 new_state = temp_state.clone()
                 # set the input neurons
+                #TODO : this method of doing things causes error when in_dim > dim
                 new_state[:, self.inputs] = x
                 new_state = self.activation(torch.nn.functional.linear(new_state, self.adj) + \
                                             self.bias)
