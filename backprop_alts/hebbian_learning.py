@@ -60,6 +60,60 @@ def hebbian_pca(x, y, W):
     weight_update = (pre_post_correlation - weight_expectation) / batch_size
     return weight_update
 
+class HebbianMLP(torch.nn.Module):
+    def __init__(self,
+                 in_dim,
+                 out_dim,
+                 dim_mult = 1,
+                 n_layers = 3,
+                 activation = torch.nn.Tanh(),
+                 lr = 0.01,
+                 wta = False):
+        super().__init__()
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+        if isinstance(dim_mult, int):
+            dim_mult = [dim_mult] * (n_layers - 1)
+        self.dim_mult = dim_mult
+        self.n_layers = n_layers
+        self.lr = lr
+        self.wta = wta
+
+        self.layers = torch.nn.ModuleList()
+        prev_dim = in_dim
+        for mult in dim_mult:
+            self.layers.append(torch.nn.Sequential(torch.nn.Linear(prev_dim, int(prev_dim * mult),
+                                                                   bias = False),
+                                              activation))
+            prev_dim = int(prev_dim * mult)
+
+        self.layers.append(torch.nn.Linear(prev_dim, out_dim))
+
+    def forward(self, x):
+        for layer in self.layers:
+            x = layer(x)
+        return x
+    
+    def train_step(self, x, y):
+        prev_x = x.clone()
+        y = y.float()
+        for i, layer in enumerate(self.layers):
+            x = layer(x)
+            if i == self.n_layers - 1:
+                error = y - x
+                # use the delta rule
+                dW = hebbian_pca(prev_x, y, layer.weight)
+                layer.weight += self.lr * dW
+            else:
+                if self.wta:
+                    dW = hebbian_wta(prev_x, x, layer[0].weight)
+                else:
+                    dW = hebbian_pca(prev_x, x, layer[0].weight)
+                layer[0].weight += self.lr * dW
+            prev_x = x.clone()
+        return [(error**2).mean().item()]
+
+
 class HebbianConv2d(torch.nn.Module):
     """
     Hebbian convolutional layer. This layer is implemented as a torch.nn.Conv2d
@@ -314,7 +368,7 @@ class GPSPLayer(torch.nn.Module):
         self.W = torch.nn.Parameter(torch.randn(latent_dim, x_dim + y_dim))
         # M is positive definite
         M = torch.randn(latent_dim, latent_dim)
-        self.M = torch.nn.Parameter(M * M.T)
+        self.M = torch.nn.Parameter(torch.abs(M))
 
     def _get_B(self, x, y = None):
         if self.task == "cca":
@@ -363,6 +417,7 @@ class GPSPLayer(torch.nn.Module):
         self.M += (self.forward_lr / self.backward_ratio) * dM
 
         return eta
+
 
 def simple_test_plots(weights, pca = False, scale_max = 5, n_clusters = 3, centers = None, points = None):
     # plot weights and centers

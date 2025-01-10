@@ -13,7 +13,7 @@ class FFBlock(torch.nn.Module):
     def __init__(self,
                  in_dim,
                  out_dim,
-                 activation = torch.nn.ReLU(),
+                 activation = torch.nn.LeakyReLU(),
                  theta = 0,
                  bias = False):
         super().__init__()
@@ -45,7 +45,7 @@ class FFNet(torch.nn.Module):
                  n_layers = 3,
                  dim_mult = 1,
                  out_dim = None,
-                 activation = torch.nn.ReLU(),
+                 activation = torch.nn.LeakyReLU(),
                  theta = 0,
                  bias = False,
                  n_labels = 10):
@@ -153,7 +153,7 @@ def mnist_test_ff(in_dim,
                   dim_mult = 0.75, 
                   threshold = 10, 
                   batch_size = 256, 
-                  lr = 0.1, 
+                  lr = 0.01, 
                   easy = False,
                   collaborative = True):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -220,7 +220,7 @@ def mnist_test_ff(in_dim,
 
     return accs, errors, y, details
 
-def _collaborative_ff_train(net, data, device, n_layers, lr = 0.1, easy = False, batch_size = 256):
+def _collaborative_ff_train(net, data, device, n_layers, lr = 0.01, easy = False, batch_size = 256):
     """
     Training based on :
     https://arxiv.org/abs/2305.12393)
@@ -247,7 +247,7 @@ def _collaborative_ff_train(net, data, device, n_layers, lr = 0.1, easy = False,
             net.train_step(x, y, layer_i, lr = lr, gamma = gamma)
     return time() - time_start, i * batch_size
 
-def _noncollaborative_ff_train(net, data, device, n_layers, lr = 0.1, easy = False, 
+def _noncollaborative_ff_train(net, data, device, n_layers, lr = 0.01, easy = False, 
                                batch_size = 256):
     """
     Standard training, where each layer is trained independently.
@@ -282,7 +282,7 @@ class PEPITA(torch.nn.Module):
                  n_layers = 3,
                  dim_mult = 1,
                  out_dim = None,
-                 activation = torch.nn.ReLU()):
+                 activation = torch.nn.LeakyReLU()):
         super().__init__()
         self.in_dim = in_dim
         self.n_layers = n_layers
@@ -315,7 +315,7 @@ class PEPITA(torch.nn.Module):
             return x, intermediate
         return x
     
-    def train_step(self, x, y, lr = 0.1):
+    def train_step(self, x, y, lr = 0.01):
         out, activations = self.forward(x, return_intermediate = True)
         error = out - y
         prev_error = self.back_layer(error)

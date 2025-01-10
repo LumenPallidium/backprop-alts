@@ -306,7 +306,7 @@ class BDLNet(torch.nn.Module):
                  out_dim,
                  dim_mult = 1,
                  n_layers = 3,
-                 activation = torch.nn.ReLU(),
+                 activation = torch.nn.Tanh(),
                  bias = False):
         """
         A bidirectional learning network with forward, backward, and lateral layers that 
@@ -388,7 +388,7 @@ class PCNet(torch.nn.Module):
                  out_dim,
                  dim_mult = 1,
                  n_layers = 3,
-                 activation = torch.nn.Tanh(),
+                 activation = torch.nn.LeakyReLU(),
                  adaptive_relaxation = False,
                  ipc = True,
                  lr = 0.01,
@@ -437,6 +437,11 @@ class PCNet(torch.nn.Module):
         elif isinstance(activation, torch.nn.Tanh):
             tanh = torch.nn.functional.tanh
             activation_derivative = lambda x: 1 - tanh(x) ** 2
+        elif isinstance(activation, torch.nn.ReLU):
+            activation_derivative = lambda x: (x > 0).float()
+        elif isinstance(activation, torch.nn.LeakyReLU):
+            alpha = activation.negative_slope
+            activation_derivative = lambda x: (x > 0).float() + alpha * (x <= 0).float()
         else:
             raise NotImplementedError(f"Activation {activation} not implemented")
         return activation, activation_derivative

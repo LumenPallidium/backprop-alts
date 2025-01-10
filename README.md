@@ -20,19 +20,23 @@ In general, the rules are implemented and tested on MNIST.
 
 All of the fully implemented algorithms are compared by their sample efficiency (how accurate are they with N samples?) and clock time efficiency (how accurate are they with X seconds of train time?). Architectures were identical as possible, however there are some caveats to that:
 
-* Hebbian learning requires odd activation functions so Tanh was used, while backprop-based training worked very poorly with Tanh, so in fairness it was replace with ReLU
-* The bidirectional version of predictive coding has forward and backward layers, so it technically has double the parameters in training, however a inference forward pass still uses the same number of parameters
-* Reservoir computing involves a blob of neurons, I did some arithmetic so the blobs have equal synapse/parameter count as the layered networks
+* Hebbian learning requires odd activation functions so Tanh was used, while backprop-based training worked very poorly with Tanh, so in fairness it was replace with LeakyReLU. For non-Hebbian, non-backprop networks, LeakyReLU was used.
+* The bidirectional version of predictive coding has forward and backward layers, so it technically has double the parameters in training, however a inference forward pass still uses the same number of parameters.
+* Most networks don't have a bias term. Backprop does since it functioned poorly otherwise.
+* Reservoir computing involves a blob of neurons, I have a calculator that does some arithmetic so the blobs have equal synapse/parameter count as the layered networks.
+* Learning rates are usually 0.01, but some networks (e.g. incremental predictive coding [iPC]) require a lower learning rate. Note that iPC takes many more weight adaption steps per training example so this is balanced out.
 
-The following plot shows sample efficiency:
+The following plot shows sample efficiency for four layer networks:
 
-![Sample Efficiency](plots/Sample%20Efficiency.png)
+![Sample Efficiency](plots/Sample%20Efficiency(4%20layers).png)
+
+Further plots for different layer counts are available in the plots folder.
 
 Backprop and the reservoir computer required optimizers, SGD was used with learning rate 0.01. Note that forward-forward does not function well with continuous (i.e. in [0, 1] values). The paper uses binary pixel values, which I did not do for comparison with the other backpropagation alternatives.
 
 Sample efficiency is not the whole story: predictive coding relies on a slow equilbration phase involving hundreds of forward passes per sample. For this reason, time taken is also important:
 
-![Clock Time](plots/Clock%20Time.png)
+![Clock Time](plots/Clock%20Time%20(4%20layers).png)
 
 
 ## TODOs

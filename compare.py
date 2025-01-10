@@ -4,6 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.ticker import PercentFormatter
 from scipy.interpolate import make_interp_spline
+from backprop_alts.hebbian_learning import HebbianMLP
 from backprop_alts.reservoir import Reservoir, LinearReadout
 from backprop_alts.predictive_coding import BDPredictiveCoder, PCNet
 from backprop_alts.forwardforward import mnist_test_ff, PEPITA
@@ -25,7 +26,7 @@ class Baseline(torch.nn.Module):
                  out_dim,
                  dim_mult = 1,
                  n_layers = 3,
-                 activation = torch.nn.ReLU(),
+                 activation = torch.nn.LeakyReLU(),
                  optimizer = torch.optim.SGD,
                  lr = 0.01,
                  ):
@@ -39,20 +40,20 @@ class Baseline(torch.nn.Module):
         self.layers = torch.nn.ModuleList()
         for i in range(n_layers - 1):
             dim_mult = self.dim_mult[i]
-            self.layers.append(torch.nn.Linear(dim,
-                                               int(dim * dim_mult),
-                                               bias = False))
+            self.layers.append(torch.nn.Sequential(torch.nn.Linear(dim,
+                                                                   int(dim * dim_mult),
+                                                                   bias = True),
+                                activation))
             dim = int(dim * dim_mult)
 
-        self.layers.append(torch.nn.Linear(dim, out_dim, bias = False))
-        
-        self.activation = activation
+        self.layers.append(torch.nn.Linear(dim, out_dim, bias = True))
+
 
         self.optimizer = optimizer(self.parameters(), lr = lr)
 
     def forward(self, x):
         for layer in self.layers:
-            x = self.activation(layer(x))
+            x = layer(x)
         return x
     
     def train_step(self, x_in, y):
@@ -110,6 +111,21 @@ def mnist_comparisons(n_epochs,
                                             n_layers = layer_count),
                                    n_epochs = n_epochs)
         scores["Backprop"] = base
+
+        # test hebbian ica
+        _, _, _, hebb_ica = mnist_test(HebbianMLP(in_dim, out_dim, 
+                                              dim_mult = mult, 
+                                              n_layers = layer_count),
+                                   n_epochs = n_epochs)
+        scores["Hebbian (ICA)"] = hebb_ica
+
+        # test hebbian wta
+        _, _, _, hebb_wta = mnist_test(HebbianMLP(in_dim, out_dim, 
+                                              dim_mult = mult, 
+                                              n_layers = layer_count,
+                                              wta = True),
+                                   n_epochs = n_epochs)
+        scores["Hebbian (WTA)"] = hebb_wta
 
         #TODO : fix reservoir, need better input functionality for when in_dim > dim
         # test the reservoir
